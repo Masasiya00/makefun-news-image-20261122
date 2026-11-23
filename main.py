@@ -1,378 +1,761 @@
 #!/usr/bin/env python3
-"""News-image 22 Nov 2026 - v6. Front-page newspaper, drawn from scratch.
-
-Pure Python 3.13 stdlib. Draws a 1024x1024 PNG of Sunday 22 November 2026
-world news (38 stories, 10 regions, 13 numbered) and writes it to
-$MAKEFUN_OUTPUT_DIR/entry.png (fallback /output/entry.png).
+"""makefun news-image-20261122 - v7 entry.
+Draws the 1024x1024 front page from scratch: hand-made serif font,
+scanline rasterizer with 4x supersampling, PNG encoder. Stdlib only.
 Deterministic: no time, no randomness, no network.
 """
+import math
 import os
 import struct
 import zlib
-from math import cos, sin, pi, sqrt
 
-W = 1024
-H = 1024
+W = H = 1024
 
-PAPER = (247, 243, 232)
-INK = (22, 22, 22)
-NAVY = (26, 43, 74)
-NAVY2 = (38, 58, 96)
-RED = (176, 32, 32)
-RED2 = (198, 52, 44)
-GREY = (96, 90, 80)
-LGREY = (120, 114, 102)
-RULE = (180, 172, 156)
-WHITE = (255, 255, 255)
-CREAM = (252, 249, 240)
+# ---------------------------------------------------------------- PNG ----
+def png_bytes(rgb, w, h):
+    raw = b"".join(b"\x00" + rgb[y * w * 3:(y + 1) * w * 3] for y in range(h))
+
+    def chunk(t, data):
+        c = t + data
+        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
 
 
-# ---------------------------------------------------------------- canvas
+# -------------------------------------------------------------- canvas ----
+def hx(s):
+    s = s.lstrip("#")
+    return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+
+
 class Canvas:
-    def __init__(self, w=W, h=H, bg=PAPER):
-        self.w = w
-        self.h = h
-        self.px = bytearray(w * h * 3)
-        r, g, b = bg
-        for i in range(0, len(self.px), 3):
-            self.px[i] = r
-            self.px[i + 1] = g
-            self.px[i + 2] = b
+    def __init__(self, w, h, bg):
+        self.w, self.h = w, h
+        self.px = bytearray(hx(bg)) * (w * h)
 
     def set(self, x, y, c):
         if 0 <= x < self.w and 0 <= y < self.h:
             i = (y * self.w + x) * 3
-            self.px[i] = c[0]
-            self.px[i + 1] = c[1]
-            self.px[i + 2] = c[2]
+            self.px[i], self.px[i + 1], self.px[i + 2] = c
 
     def blend(self, x, y, c, a):
-        """Blend colour c with coverage a (0..1) onto pixel."""
-        if a <= 0.0 or not (0 <= x < self.w and 0 <= y < self.h):
-            return
-        if a >= 1.0:
-            self.set(x, y, c)
+        """a: 0..255 coverage of color c over existing pixel."""
+        if a <= 0 or not (0 <= x < self.w and 0 <= y < self.h):
             return
         i = (y * self.w + x) * 3
-        self.px[i] = int(c[0] * a + self.px[i] * (1 - a))
-        self.px[i + 1] = int(c[1] * a + self.px[i + 1] * (1 - a))
-        self.px[i + 2] = int(c[2] * a + self.px[i + 2] * (1 - a))
+        if a >= 255:
+            self.px[i], self.px[i + 1], self.px[i + 2] = c
+            return
+        ia = 255 - a
+        self.px[i] = (c[0] * a + self.px[i] * ia) >> 8
+        self.px[i + 1] = (c[1] * a + self.px[i + 1] * ia) >> 8
+        self.px[i + 2] = (c[2] * a + self.px[i + 2] * ia) >> 8
 
-    def rect(self, x, y, w, h, c):
-        x0 = max(0, int(x))
-        y0 = max(0, int(y))
-        x1 = min(self.w, int(x + w))
-        y1 = min(self.h, int(y + h))
+    def rect(self, x0, y0, x1, y1, c):
+        x0 = max(0, int(math.floor(x0))); y0 = max(0, int(math.floor(y0)))
+        x1 = min(self.w, int(math.ceil(x1))); y1 = min(self.h, int(math.ceil(y1)))
         if x1 <= x0 or y1 <= y0:
             return
-        row = bytes(c) * (x1 - x0)
-        for yy in range(y0, y1):
-            i = (yy * self.w + x0) * 3
-            self.px[i:i + len(row)] = row
+        r, g, b = c
+        for y in range(y0, y1):
+            i = (y * self.w + x0) * 3
+            n = x1 - x0
+            self.px[i:i + n * 3] = bytes((r, g, b)) * n
 
-    def hline(self, x, y, w, c, th=1):
-        self.rect(x, y, w, th, c)
+    def vgrad(self, x0, y0, x1, y1, ctop, cbot):
+        """Vertical linear gradient rectangle."""
+        x0 = max(0, int(math.floor(x0))); y0 = max(0, int(math.floor(y0)))
+        x1 = min(self.w, int(math.ceil(x1))); y1 = min(self.h, int(math.ceil(y1)))
+        hgt = max(1, y1 - y0)
+        for y in range(y0, y1):
+            t = (y - y0) / hgt
+            c = tuple(int(ctop[k] + (cbot[k] - ctop[k]) * t) for k in range(3))
+            self.rect(x0, y, x1, y + 1, c)
 
-    def vgrad(self, x, y, w, h, top, bot):
-        """Vertical gradient rectangle."""
-        if h <= 0 or w <= 0:
-            return
-        for yy in range(int(y), int(y + h)):
-            t = (yy - y) / max(1, h - 1)
-            c = (int(top[0] + (bot[0] - top[0]) * t),
-                 int(top[1] + (bot[1] - top[1]) * t),
-                 int(top[2] + (bot[2] - top[2]) * t))
-            self.rect(x, yy, w, 1, c)
-
-    def circle(self, cx, cy, r, c):
-        r = int(r)
-        for dy in range(-r, r + 1):
-            dx = int(sqrt(max(0, r * r - dy * dy)))
-            self.rect(cx - dx, cy + dy, 2 * dx + 1, 1, c)
+    def hgrad(self, x0, y0, x1, y1, cleft, cright):
+        x0 = max(0, int(math.floor(x0))); y0 = max(0, int(math.floor(y0)))
+        x1 = min(self.w, int(math.ceil(x1))); y1 = min(self.h, int(math.ceil(y1)))
+        wdt = max(1, x1 - x0)
+        for x in range(x0, x1):
+            t = (x - x0) / wdt
+            c = tuple(int(cleft[k] + (cright[k] - cleft[k]) * t) for k in range(3))
+            self.rect(x, y0, x + 1, y1, c)
 
     def disc(self, cx, cy, r, c):
-        self.circle(cx, cy, r, c)
+        """Filled circle, 1px AA on the rim."""
+        r = float(r)
+        y0 = max(0, int(math.floor(cy - r - 1))); y1 = min(self.h, int(math.ceil(cy + r + 1)))
+        for y in range(y0, y1):
+            dy = y + 0.5 - cy
+            dx = math.sqrt(max(0.0, r * r - dy * dy))
+            x0 = int(math.floor(cx - dx)); x1 = int(math.ceil(cx + dx))
+            for x in range(max(0, x0), min(self.w, x1)):
+                d = math.hypot(x + 0.5 - cx, y + 0.5 - cy)
+                if d <= r - 0.5:
+                    self.set(x, y, c)
+                elif d < r + 0.5:
+                    self.blend(x, y, c, int(255 * (r + 0.5 - d)))
 
     def ellipse(self, cx, cy, rx, ry, c):
-        rx = int(rx)
-        ry = int(ry)
-        for dy in range(-ry, ry + 1):
-            t = 1 - (dy * dy) / max(1, ry * ry)
-            dx = int(rx * sqrt(max(0, t)))
-            self.rect(cx - dx, cy + dy, 2 * dx + 1, 1, c)
+        y0 = max(0, int(math.floor(cy - ry - 1))); y1 = min(self.h, int(math.ceil(cy + ry + 1)))
+        for y in range(y0, y1):
+            dy = (y + 0.5 - cy) / ry
+            if abs(dy) >= 1:
+                continue
+            dx = rx * math.sqrt(1.0 - dy * dy)
+            x0 = int(math.floor(cx - dx)); x1 = int(math.ceil(cx + dx))
+            for x in range(max(0, x0), min(self.w, x1)):
+                d = ((x + 0.5 - cx) / rx) ** 2 + ((y + 0.5 - cy) / ry) ** 2
+                if d <= 0.92:
+                    self.set(x, y, c)
+                elif d < 1.08:
+                    self.blend(x, y, c, int(255 * (1.08 - d) / 0.16))
 
-    def ring(self, cx, cy, r, th, c):
-        for dy in range(-r, r + 1):
-            dx = int(sqrt(max(0, r * r - dy * dy)))
-            dx2 = int(sqrt(max(0, (r - th) * (r - th) - dy * dy))) if abs(dy) < r - th else 0
-            self.rect(cx - dx, cy + dy, dx - dx2, 1, c)
-            self.rect(cx + dx2 + 1, cy + dy, dx - dx2, 1, c)
+    def ring(self, cx, cy, r_out, r_in, c):
+        """Filled annulus."""
+        y0 = max(0, int(math.floor(cy - r_out - 1))); y1 = min(self.h, int(math.ceil(cy + r_out + 1)))
+        for y in range(y0, y1):
+            dy = y + 0.5 - cy
+            for x in range(max(0, int(math.floor(cx - r_out))), min(self.w, int(math.ceil(cx + r_out)))):
+                d = math.hypot(x + 0.5 - cx, dy)
+                if r_in + 0.4 <= d <= r_out - 0.4:
+                    self.set(x, y, c)
+                elif r_in - 0.4 < d < r_in + 0.4 or r_out - 0.4 < d < r_out + 0.4:
+                    a = 255 - int(255 * abs(d - r_out) / 0.8) if d > (r_out + r_in) / 2 else \
+                        255 - int(255 * abs(d - r_in) / 0.8)
+                    self.blend(x, y, c, max(0, min(255, a)))
 
     def poly(self, pts, c):
-        """Scanline fill of a polygon (list of (x, y))."""
+        """Filled polygon, even-odd scanline, 1px vertical AA approx."""
         if len(pts) < 3:
             return
-        ys = [p[1] for p in pts]
-        y0 = max(0, int(min(ys)))
-        y1 = min(self.h - 1, int(max(ys)) + 1)
+        edges = []
         n = len(pts)
-        for yy in range(y0, y1 + 1):
+        for i in range(n):
+            x0, y0 = pts[i]; x1, y1 = pts[(i + 1) % n]
+            if y0 == y1:
+                continue
+            edges.append((x0, y0, x1, y1))
+        if not edges:
+            return
+        y0 = max(0, int(math.floor(min(p[1] for p in pts))))
+        y1 = min(self.h, int(math.ceil(max(p[1] for p in pts))))
+        for y in range(y0, y1):
+            yc = y + 0.5
             xs = []
-            for i in range(n):
-                x1, y1a = pts[i]
-                x2, y2a = pts[(i + 1) % n]
-                if (y1a <= yy < y2a) or (y2a <= yy < y1a):
-                    t = (yy - y1a) / (y2a - y1a) if y2a != y1a else 0
-                    xs.append(x1 + t * (x2 - x1))
+            for x0, yy0, x1, yy1 in edges:
+                if (yy0 <= yc < yy1) or (yy1 <= yc < yy0):
+                    xs.append(x0 + (yc - yy0) * (x1 - x0) / (yy1 - yy0))
             xs.sort()
             for k in range(0, len(xs) - 1, 2):
-                self.rect(int(xs[k]), yy, max(1, int(xs[k + 1]) - int(xs[k])), 1, c)
+                xa = int(math.ceil(xs[k])); xb = int(math.floor(xs[k + 1]))
+                for x in range(max(0, xa), min(self.w, xb + 1)):
+                    self.set(x, y, c)
 
-    def thick_line(self, x1, y1, x2, y2, th, c):
-        dx = x2 - x1
-        dy = y2 - y1
-        ln = sqrt(dx * dx + dy * dy) or 1
-        nx = -dy / ln * th / 2
-        ny = dx / ln * th / 2
-        self.poly([(x1 + nx, y1 + ny), (x2 + nx, y2 + ny),
-                   (x2 - nx, y2 - ny), (x1 - nx, y1 - ny)], c)
+    def line(self, x0, y0, x1, y1, wdt, c):
+        """Thick line as a polygon."""
+        dx, dy = x1 - x0, y1 - y0
+        L = math.hypot(dx, dy) or 1.0
+        nx, ny = -dy / L * wdt / 2.0, dx / L * wdt / 2.0
+        self.poly([(x0 + nx, y0 + ny), (x1 + nx, y1 + ny),
+                   (x1 - nx, y1 - ny), (x0 - nx, y0 - ny)], c)
 
-    def frame(self, x, y, w, h, c, th=1):
-        self.rect(x, y, w, th, c)
-        self.rect(x, y + h - th, w, th, c)
-        self.rect(x, y, th, h, c)
-        self.rect(x + w - th, y, th, h, c)
+    def hline(self, x0, x1, y, wdt, c):
+        self.rect(x0, y - wdt / 2.0, x1, y + wdt / 2.0, c)
 
 
-def png_bytes(cv):
-    raw = bytearray()
-    for yy in range(cv.h):
-        raw.append(0)
-        i = yy * cv.w * 3
-        raw += cv.px[i:i + cv.w * 3]
-    comp = zlib.compress(bytes(raw), 6)
+# ------------------------------------------------- font path helpers ----
+# Glyph space: y down, cap top y=0, baseline y=70, descender bottom y=92,
+# x-height top y=20. One em = 70 units of cap height.
+# A subpath is a list of segments: ('M',x,y) move, ('L',x,y) line,
+# ('C',x1,y1,x2,y2,x3,y3) cubic bezier, ('A',cx,cy,rx,ry,a0,a1) arc
+# (angles in degrees, x=cx+rx*cos, y=cy+ry*sin, increasing = clockwise).
+# Fill rule is NONZERO: outer contours clockwise, counters counter-clockwise.
 
-    def chunk(kind, data):
-        out = struct.pack(">I", len(data)) + kind + data
-        out += struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
-        return out
-
-    ihdr = struct.pack(">IIBBBBB", cv.w, cv.h, 8, 2, 0, 0, 0)
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
-            + chunk(b"IDAT", comp) + chunk(b"IEND", b""))
+def rect_p(x0, y0, x1, y1):
+    return [("M", x0, y0), ("L", x1, y0), ("L", x1, y1), ("L", x0, y1)]
 
 
-# ---------------------------------------------------------------- font
-# Hand-built stroke serif. Cap height = 1.0 em. y: 0 = cap top, 1 = baseline,
-# 1.28 = descender bottom, 0.30 = x-height top.
-# Thickness (em): vertical TV = 0.155, horizontal TH = 0.105  -> ratio 1.48.
-# Diagonal TD = 0.13. Serifs are short horizontal ticks (0.055 thick).
-TV = 0.155
-TH = 0.105
-TD = 0.13
-SS = 4  # supersampling factor (v6: 4x, up from 3x)
-
-# A stroke: (kind, data, thick) where thick may be a float or ("var", tv, th)
-# for arcs whose thickness varies with angle (thick at sides, thin top/bottom).
-#   L: (x1, y1, x2, y2)          straight line
-#   B: (x1,y1, cx1,cy1, cx2,cy2, x2,y2)  cubic bezier spine
-#   A: (cx, cy, rx, ry, a0, a1)  arc, angles in degrees, 0 = east, ccw negative y
-#   D: (cx, cy, r)               filled disc
+def stem_p(x, y0, y1, w, fl=1.8):
+    """Vertical stem with flared (serif) ends, clockwise."""
+    f = fl
+    return [("M", x - f, y0), ("L", x + w + f, y0), ("L", x + w, y0 + 6),
+            ("L", x + w, y1 - 6), ("L", x + w + f, y1), ("L", x - f, y1),
+            ("L", x, y1 - 6), ("L", x, y0 + 6)]
 
 
-def _bez(p0, p1, p2, p3, n=22):
-    pts = []
+def ell_p(cx, cy, rx, ry, ccw=False):
+    return [("M", cx + rx, cy), ("A", cx, cy, rx, ry, 0, -360 if ccw else 360)]
+
+
+def arc_p(cx, cy, rx, ry, a0, a1):
+    return [("M", cx + rx * math.cos(math.radians(a0)), cy + ry * math.sin(math.radians(a0))),
+            ("A", cx, cy, rx, ry, a0, a1)]
+
+
+def bez_pts(p0, p1, p2, p3, n=14):
+    out = []
     for i in range(n + 1):
         t = i / n
-        u = 1 - t
-        x = u**3 * p0[0] + 3 * u * u * t * p1[0] + 3 * u * t * t * p2[0] + t**3 * p3[0]
-        y = u**3 * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t**3 * p3[1]
-        pts.append((x, y))
-    return pts
+        mt = 1 - t
+        x = mt ** 3 * p0[0] + 3 * mt * mt * t * p1[0] + 3 * mt * t * t * p2[0] + t ** 3 * p3[0]
+        y = mt ** 3 * p0[1] + 3 * mt * mt * t * p1[1] + 3 * mt * t * t * p2[1] + t ** 3 * p3[1]
+        out.append((x, y))
+    return out
 
 
-def _arc_pts(cx, cy, rx, ry, a0, a1, n=28):
+def catmull(pts, n=10):
+    """Catmull-Rom spline through control points -> dense polyline."""
+    if len(pts) < 3:
+        return list(pts)
+    P = [pts[0]] + list(pts) + [pts[-1]]
+    out = []
+    for i in range(len(P) - 3):
+        p0, p1, p2, p3 = P[i], P[i + 1], P[i + 2], P[i + 3]
+        for j in range(n):
+            t = j / n
+            t2, t3 = t * t, t * t * t
+            x = 0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t
+                       + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2
+                       + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
+            y = 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t
+                       + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2
+                       + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+            out.append((x, y))
+    out.append(pts[-1])
+    return out
+
+
+def spine_poly(pts, hw):
+    """Stroke a centerline polyline with varying half-width -> closed polygon.
+    hw: scalar or list of half-widths per point. Width varies smoothly."""
+    n = len(pts)
+    if isinstance(hw, (int, float)):
+        hw = [hw] * n
+    left, right = [], []
+    for i in range(n):
+        x, y = pts[i]
+        x0, y0 = pts[max(0, i - 1)]
+        x1, y1 = pts[min(n - 1, i + 1)]
+        tx, ty = x1 - x0, y1 - y0
+        L = math.hypot(tx, ty) or 1.0
+        tx, ty = tx / L, ty / L
+        nx, ny = -ty, tx
+        h = hw[i]
+        left.append((x + nx * h, y + ny * h))
+        right.append((x - nx * h, y - ny * h))
+    return left + right[::-1]
+
+
+def spine_hw(pts, thick=5.0, thin=3.3):
+    """Half-width per spine point: thick where tangent is vertical, thin
+    where horizontal -> light contrast ~1.5:1, like a serif text face."""
+    out = []
+    n = len(pts)
+    for i in range(n):
+        x0, y0 = pts[max(0, i - 1)]
+        x1, y1 = pts[min(n - 1, i + 1)]
+        tx, ty = x1 - x0, y1 - y0
+        L = math.hypot(tx, ty) or 1.0
+        out.append(thin + (thick - thin) * abs(ty) / L)
+    return out
+
+
+def flatten_subpath(sp):
+    """Subpath segments -> list of (x, y) points (closed implicitly)."""
     pts = []
-    steps = max(4, int(abs(a1 - a0) / 9) + 2)
-    for i in range(steps + 1):
-        a = (a0 + (a1 - a0) * i / steps) * pi / 180.0
-        pts.append((cx + rx * cos(a), cy - ry * sin(a)))
+    cur = None
+    for seg in sp:
+        if seg[0] == "M":
+            cur = (seg[1], seg[2])
+            pts.append(cur)
+        elif seg[0] == "L":
+            cur = (seg[1], seg[2])
+            pts.append(cur)
+        elif seg[0] == "C":
+            p0 = cur
+            p1 = (seg[1], seg[2]); p2 = (seg[3], seg[4]); p3 = (seg[5], seg[6])
+            bp = bez_pts(p0, p1, p2, p3, 12)
+            pts.extend(bp[1:])
+            cur = p3
+        elif seg[0] == "A":
+            _, cx, cy, rx, ry, a0, a1 = seg
+            sweep = a1 - a0
+            steps = max(4, int(abs(sweep) / 9))
+            for i in range(1, steps + 1):
+                a = math.radians(a0 + sweep * i / steps)
+                pts.append((cx + rx * math.cos(a), cy + ry * math.sin(a)))
+            cur = pts[-1]
     return pts
 
 
-def _flatten(stroke):
-    """Return list of (x, y, thick) points along the stroke spine."""
-    kind, data, th = stroke
-    if kind == "L":
-        x1, y1, x2, y2 = data
-        return [(x1, y1, th), (x2, y2, th)]
-    if kind == "B":
-        pts = _bez((data[0], data[1]), (data[2], data[3]),
-                   (data[4], data[5]), (data[6], data[7]))
-        return [(x, y, th) for x, y in pts]
-    if kind == "A":
-        cx, cy, rx, ry, a0, a1 = data
-        raw = _arc_pts(cx, cy, rx, ry, a0, a1)
-        out = []
-        for (x, y) in raw:
-            if isinstance(th, tuple):  # ("var", tv, th)
-                ang = 0.0
-                # thickness by direction from centre: sides thick, top thin
-                dx = (x - cx) / max(rx, 1e-6)
-                w = abs(dx)  # 1 at sides, 0 at top/bottom
-                t = th[2] + (th[1] - th[2]) * w
-            else:
-                t = th
-            out.append((x, y, t))
-        return out
-    if kind == "D":
-        return [(data[0], data[1], data[2] * 2)]
-    return []
+def flatten_glyph(subpaths):
+    return [flatten_subpath(sp) for sp in subpaths]
+
+# ------------------------------------------- glyph construction helpers ----
+def poly_p(pts):
+    return [("M", pts[0][0], pts[0][1])] + [("L", x, y) for x, y in pts[1:]]
 
 
-def _serif(x, y, wdt=0.09):
-    """Small horizontal serif tick centred on x at height y."""
-    return ("L", (x - wdt, y, x + wdt, y), 0.055)
+def ring_p(cx, cy, rxo, ryo, rxi, ryi):
+    """Closed ring: outer ellipse clockwise, inner counter-clockwise."""
+    return [ell_p(cx, cy, rxo, ryo), ell_p(cx, cy, rxi, ryi, ccw=True)]
 
 
-_glyph_cache = {}
+def ring_seg(cx, cy, rxo, ryo, rxi, ryi, a0, a1):
+    """Ring segment from angle a0 to a1 (clockwise sweep), e.g. C, U, ( )."""
+    ox0 = cx + rxo * math.cos(math.radians(a0)); oy0 = cy + ryo * math.sin(math.radians(a0))
+    ix1 = cx + rxi * math.cos(math.radians(a1)); iy1 = cy + ryi * math.sin(math.radians(a1))
+    return [("M", ox0, oy0), ("A", cx, cy, rxo, ryo, a0, a1),
+            ("L", ix1, iy1), ("A", cx, cy, rxi, ryi, a1, a0)]
 
 
-def render_glyph(ch, size):
-    """Return (mask, w_px, h_px, xoff, yoff): mask is rows of 0..1 floats at
-    display resolution (already downsampled from SS). yoff = top of tile
-    relative to cap top (negative for ascenders handled by caller)."""
-    key = (ch, size)
-    if key in _glyph_cache:
-        return _glyph_cache[key]
-    spec = GLYPHS.get(ch)
-    if spec is None:
-        spec = GLYPHS["?"]
-    gw, strokes = spec
-    s = float(size)  # cap height in px
-    # tile in subpixels
-    tw = max(1, int((gw + 0.06) * s * SS))
-    th = max(1, int(1.34 * s * SS))
-    buf = [0.0] * (tw * th)
-    # rasterise each stroke segment into the subpixel buffer
-    for stroke in strokes:
-        pts = _flatten(stroke)
-        if stroke[0] == "D":
-            cx, cy, r = stroke[1]
-            rr = r * s * SS
-            ccx = (cx + 0.03) * s * SS
-            ccy = cy * s * SS
-            x0 = max(0, int(ccx - rr - 1))
-            x1 = min(tw - 1, int(ccx + rr + 1))
-            y0 = max(0, int(ccy - rr - 1))
-            y1 = min(th - 1, int(ccy + rr + 1))
-            for yy in range(y0, y1 + 1):
-                for xx in range(x0, x1 + 1):
-                    dx = (xx + 0.5 - ccx) / max(rr, 1e-6)
-                    dy = (yy + 0.5 - ccy) / max(rr, 1e-6)
-                    if dx * dx + dy * dy <= 1.0:
-                        buf[yy * tw + xx] = 1.0
+def bowl_r(cx, cy, rxo, ryo, rxi, ryi):
+    """Right bowl for D/B: outer arc -90..90 + chord; inner counter CCW."""
+    outer = [("M", cx, cy - ryo), ("A", cx, cy, rxo, ryo, -90, 90)]
+    inner = [("M", cx, cy + ryi), ("A", cx, cy, rxi, ryi, 90, -90)]
+    return [outer, inner]
+
+
+def bowl_top(cx, cy, rxo, ryo, rxi, ryi, a_end=60):
+    """Upper bowl for P/R: outer arc -90..a_end, inner counter CCW.
+    Stem left edge is at x = cx-10."""
+    ex = cx + rxo * math.cos(math.radians(a_end)); ey = cy + ryo * math.sin(math.radians(a_end))
+    ix = cx + rxi * math.cos(math.radians(a_end)); iy = cy + ryi * math.sin(math.radians(a_end))
+    outer = [("M", cx, cy - ryo), ("A", cx, cy, rxo, ryo, -90, a_end),
+             ("L", cx - 10, ey), ("L", cx - 10, cy - ryo)]
+    inner = [("M", ix, iy), ("A", cx, cy, rxi, ryi, a_end, -90),
+             ("L", cx, iy)]
+    return [outer, inner]
+
+
+def arch_p(cx, cy, rxo, ryo, rxi, ryi, yb):
+    """Inverted-U arch for n/m/h: outer arc 180..360, inner back, legs to yb."""
+    return [("M", cx - rxo, yb), ("L", cx - rxo, cy),
+            ("A", cx, cy, rxo, ryo, 180, 360), ("L", cx + rxo, yb),
+            ("L", cx + rxi, yb), ("L", cx + rxi, cy),
+            ("A", cx, cy, rxi, ryi, 360, 180), ("L", cx - rxi, yb)]
+
+
+def bar(x0, x1, y, h):
+    return rect_p(x0, y, x1, y + h)
+
+
+# S spine control points (cap box 0..70). Two lobes, upper smaller.
+S_CTRL = [(46, 9), (38, 2), (26, 1), (15, 6), (11, 15), (13, 24), (20, 30),
+          (29, 34), (38, 38), (45, 45), (47, 54), (42, 63), (33, 68),
+          (22, 69), (12, 64)]
+
+
+def s_paths(ctrl=S_CTRL, thick=5.0, thin=3.3):
+    pts = catmull(ctrl, 8)
+    return [poly_p(spine_poly(pts, spine_hw(pts, thick, thin)))]
+
+
+# ------------------------------------------------------- uppercase glyphs ----
+# Each entry: (advance width, [subpaths]). Stem 10, bar 6.5 -> ratio 1.54:1.
+U = {}
+U["A"] = (60, [poly_p([(26, 0), (33, 0), (14, 70), (4, 70)]),
+               poly_p([(26, 0), (33, 0), (55, 70), (45, 70)]),
+               rect_p(13, 44, 46, 50.5)])
+U["B"] = (58, [stem_p(6, 0, 70, 10)] + bowl_r(16, 19, 30, 19, 20.5, 12.5)
+          + bowl_r(16, 50, 33, 20, 23, 13))
+U["C"] = (58, [ring_seg(30, 35, 29, 35, 19, 28.5, 52, 308)])
+U["D"] = (58, [stem_p(6, 0, 70, 10)] + bowl_r(16, 35, 36, 35, 26, 28.5))
+U["E"] = (56, [stem_p(6, 0, 70, 10), bar(6, 58, 0, 6.5), bar(6, 46, 31.5, 6.5),
+               bar(6, 58, 63.5, 6.5)])
+U["F"] = (54, [stem_p(6, 0, 70, 10), bar(6, 56, 0, 6.5), bar(6, 46, 31.5, 6.5)])
+U["G"] = (60, [ring_seg(30, 35, 29, 35, 19, 28.5, 52, 308),
+               rect_p(30, 40, 56, 46.5), rect_p(48.5, 40, 56, 58)])
+U["H"] = (60, [stem_p(6, 0, 70, 10), stem_p(44, 0, 70, 10), bar(16, 44, 31.5, 6.5)])
+U["I"] = (34, [stem_p(12, 0, 70, 10), bar(3, 31, 0, 6.5), bar(3, 31, 63.5, 6.5)])
+U["J"] = (52, [bar(20, 58, 0, 6.5),
+               poly_p(spine_poly(catmull([(49, 4), (49, 30), (48, 46), (43, 58),
+                                           (34, 64), (24, 62), (18, 54)], 8),
+                                  spine_hw(catmull([(49, 4), (49, 30), (48, 46), (43, 58),
+                                                    (34, 64), (24, 62), (18, 54)], 8),
+                                           5.0, 3.6)))])
+U["K"] = (60, [stem_p(6, 0, 70, 10),
+               poly_p([(16, 38), (26, 32), (58, 0), (48, 0)]),
+               poly_p([(30, 38), (38, 44), (58, 70), (48, 70)])])
+U["L"] = (54, [stem_p(6, 0, 70, 10), bar(6, 56, 63.5, 6.5)])
+U["M"] = (66, [stem_p(6, 0, 70, 10), stem_p(50, 0, 70, 10),
+               poly_p([(16, 0), (24, 0), (36, 44), (28, 44)]),
+               poly_p([(42, 0), (50, 0), (36, 44), (28, 44)])])
+U["N"] = (60, [stem_p(6, 0, 70, 10), stem_p(44, 0, 70, 10),
+               poly_p([(16, 0), (26, 0), (54, 70), (44, 70)])])
+U["O"] = (60, ring_p(30, 35, 29, 35, 19, 28.5))
+U["P"] = (56, [stem_p(6, 0, 70, 10)] + bowl_top(16, 20, 32, 20, 22, 13.5, 60))
+U["Q"] = (62, ring_p(30, 35, 29, 35, 19, 28.5)
+          + [poly_p([(42, 50), (50, 46), (62, 68), (55, 70)])])
+U["R"] = (58, [stem_p(6, 0, 70, 10)] + bowl_top(16, 20, 32, 20, 22, 13.5, 60)
+          + [poly_p([(36, 36), (46, 40), (60, 70), (50, 70)])])
+U["S"] = (58, s_paths())
+U["T"] = (58, [bar(4, 58, 0, 6.5), stem_p(24, 0, 70, 10)])
+U["U"] = (60, [stem_p(6, 0, 48, 10), stem_p(44, 0, 48, 10),
+               ring_seg(30, 46, 24, 24, 15, 17.5, 0, 180)])
+U["V"] = (58, [poly_p([(6, 0), (17, 0), (37, 70), (26, 70)]),
+               poly_p([(47, 0), (58, 0), (37, 70), (26, 70)])])
+U["W"] = (80, [poly_p([(6, 0), (15, 0), (29, 70), (20, 70)]),
+               poly_p([(35, 0), (44, 0), (29, 70), (20, 70)]),
+               poly_p([(35, 0), (44, 0), (59, 70), (50, 70)]),
+               poly_p([(65, 0), (74, 0), (59, 70), (50, 70)])])
+U["X"] = (58, [poly_p([(6, 0), (16, 0), (58, 70), (48, 70)]),
+               poly_p([(48, 0), (58, 0), (16, 70), (6, 70)])])
+U["Y"] = (58, [poly_p([(6, 0), (17, 0), (37, 40), (26, 40)]),
+               poly_p([(47, 0), (58, 0), (37, 40), (26, 40)]),
+               stem_p(26, 36, 70, 10)])
+U["Z"] = (56, [bar(6, 58, 0, 6.5), bar(6, 58, 63.5, 6.5),
+               poly_p([(50, 6.5), (58, 6.5), (14, 63.5), (6, 63.5)])])
+
+# ------------------------------------------------------- lowercase glyphs ----
+# x-height 20..70, ascender 0, descender 92. Stem 9, bar 6 -> ratio 1.5:1.
+L = {}
+L["a"] = (54, ring_p(30, 47, 21, 23, 12, 17) + [stem_p(45, 20, 70, 9),
+               poly_p(spine_poly(catmull([(50, 23), (42, 20), (32, 20), (24, 24)], 8),
+                                  spine_hw(catmull([(50, 23), (42, 20), (32, 20), (24, 24)], 8),
+                                           3.8, 3.0)))])
+L["b"] = (54, [stem_p(6, 0, 70, 9)] + ring_p(31, 48, 20, 22, 11.5, 16))
+L["c"] = (52, [ring_seg(30, 45, 21, 25, 12, 19, 50, 310)])
+L["d"] = (54, ring_p(27, 48, 20, 22, 11.5, 16) + [stem_p(45, 0, 70, 9)])
+L["e"] = (54, ring_p(30, 47, 21, 23, 12.5, 17) + [rect_p(10, 43, 50, 49.5)])
+L["f"] = (40, [stem_p(26, 6, 70, 9),
+               poly_p(spine_poly(catmull([(28, 12), (30, 2), (38, -1), (45, 4),
+                                           (47, 12)], 8),
+                                  spine_hw(catmull([(28, 12), (30, 2), (38, -1), (45, 4),
+                                                    (47, 12)], 8), 4.5, 3.0))),
+               rect_p(14, 32, 48, 38)])
+L["g"] = (54, ring_p(29, 46, 20, 22, 11.5, 16) + [stem_p(44, 20, 70, 9),
+               poly_p(spine_poly(catmull([(48, 64), (50, 78), (46, 88), (36, 92),
+                                           (25, 90), (19, 83)], 8),
+                                  spine_hw(catmull([(48, 64), (50, 78), (46, 88), (36, 92),
+                                                    (25, 90), (19, 83)], 8),
+                                           5.0, 3.2)))])
+L["h"] = (54, [stem_p(6, 0, 70, 9), arch_p(30, 34, 20, 15, 11, 9.5, 70)])
+L["i"] = (30, [stem_p(11, 20, 70, 9), ell_p(15.5, 8.5, 4.5, 4.5)])
+L["j"] = (32, [ell_p(16, 2, 4.5, 4.5), stem_p(11, 10, 86, 9),
+               poly_p(spine_poly(catmull([(15, 82), (13, 90), (6, 92), (0, 86)], 8),
+                                  spine_hw(catmull([(15, 82), (13, 90), (6, 92), (0, 86)], 8),
+                                           4.5, 3.0)))])
+L["k"] = (54, [stem_p(6, 0, 70, 9),
+               poly_p([(15, 40), (23, 34), (45, 20), (37, 20)]),
+               poly_p([(28, 42), (36, 46), (50, 70), (42, 70)])])
+L["l"] = (32, [stem_p(11, 0, 70, 9), rect_p(7, 65, 25, 70)])
+L["m"] = (78, [stem_p(6, 20, 70, 9), arch_p(26, 34, 16, 15, 8, 9.5, 70),
+               arch_p(54, 34, 16, 15, 8, 9.5, 70)])
+L["n"] = (54, [stem_p(6, 20, 70, 9), arch_p(30, 34, 20, 15, 11, 9.5, 70)])
+L["o"] = (54, ring_p(30, 45, 21, 25, 12, 19))
+L["p"] = (54, [stem_p(6, 20, 92, 9)] + ring_p(31, 48, 20, 22, 11.5, 16))
+L["q"] = (54, ring_p(27, 48, 20, 22, 11.5, 16) + [stem_p(45, 20, 92, 9)])
+L["r"] = (38, [stem_p(6, 20, 70, 9),
+               poly_p(spine_poly(catmull([(14, 26), (22, 20), (32, 21), (38, 28),
+                                           (40, 36)], 8),
+                                  spine_hw(catmull([(14, 26), (22, 20), (32, 21), (38, 28),
+                                                    (40, 36)], 8), 4.5, 3.0)))])
+L["s"] = (50, s_paths([(42, 23), (34, 19), (23, 20), (14, 26), (13, 34), (19, 40),
+                       (29, 43), (38, 47), (42, 54), (40, 61), (33, 67), (22, 68),
+                       (13, 63)], 4.8, 3.2))
+L["t"] = (38, [stem_p(14, 8, 70, 9), rect_p(4, 30, 34, 36),
+               poly_p(spine_poly(catmull([(18, 62), (20, 69), (26, 71), (32, 66)], 8),
+                                  spine_hw(catmull([(18, 62), (20, 69), (26, 71), (32, 66)], 8),
+                                           4.5, 3.0)))])
+L["u"] = (54, [stem_p(6, 20, 48, 9), stem_p(39, 20, 48, 9),
+               ring_seg(27, 46, 21, 24, 12.5, 18, 0, 180)])
+L["v"] = (52, [poly_p([(6, 20), (15, 20), (33, 70), (24, 70)]),
+               poly_p([(41, 20), (50, 20), (33, 70), (24, 70)])])
+L["w"] = (72, [poly_p([(6, 20), (14, 20), (26, 70), (18, 70)]),
+               poly_p([(22, 20), (30, 20), (26, 70), (18, 70)]),
+               poly_p([(30, 20), (38, 20), (50, 70), (42, 70)]),
+               poly_p([(46, 20), (54, 20), (50, 70), (42, 70)])])
+L["x"] = (52, [poly_p([(6, 20), (14, 20), (50, 70), (42, 70)]),
+               poly_p([(42, 20), (50, 20), (14, 70), (6, 70)])])
+L["y"] = (52, [poly_p([(6, 20), (14, 20), (30, 66), (22, 66)]),
+               poly_p([(42, 20), (50, 20), (30, 66), (22, 66)]),
+               poly_p(spine_poly(catmull([(28, 62), (30, 74), (28, 84), (22, 90),
+                                           (15, 88)], 8),
+                                  spine_hw(catmull([(28, 62), (30, 74), (28, 84), (22, 90),
+                                                    (15, 88)], 8), 4.5, 3.0)))])
+L["z"] = (50, [rect_p(8, 20, 50, 26), rect_p(8, 64, 50, 70),
+               poly_p([(44, 26), (50, 26), (14, 64), (8, 64)])])
+
+# ------------------------------------------------------------ digits 0-9 ----
+D = {}
+D["0"] = (58, ring_p(29, 35, 26, 35, 16, 28.5))
+D["1"] = (40, [stem_p(20, 0, 70, 10),
+               poly_p([(4, 20), (12, 10), (22, 4), (22, 12)]),
+               rect_p(8, 63.5, 38, 70)])
+D["2"] = (56, [poly_p(spine_poly(catmull([(12, 16), (16, 4), (28, 0), (40, 4),
+                                           (44, 14), (38, 24), (24, 40), (14, 58),
+                                           (12, 64)], 8),
+                                  spine_hw(catmull([(12, 16), (16, 4), (28, 0), (40, 4),
+                                                    (44, 14), (38, 24), (24, 40), (14, 58),
+                                                    (12, 64)], 8), 5.0, 3.3))),
+               rect_p(10, 63.5, 48, 70)])
+D["3"] = (56, [poly_p(spine_poly(catmull([(14, 8), (24, 2), (36, 4), (44, 12),
+                                           (42, 22), (34, 28), (40, 32), (46, 40),
+                                           (46, 52), (38, 64), (24, 68), (12, 64)], 8),
+                                  spine_hw(catmull([(14, 8), (24, 2), (36, 4), (44, 12),
+                                                    (42, 22), (34, 28), (40, 32), (46, 40),
+                                                    (46, 52), (38, 64), (24, 68), (12, 64)], 8),
+                                           5.0, 3.3)))])
+D["4"] = (58, [poly_p([(38, 0), (46, 0), (14, 54), (6, 54)]),
+               stem_p(36, 0, 70, 10), rect_p(6, 44, 48, 50.5)])
+D["5"] = (56, [rect_p(10, 0, 48, 6.5), rect_p(10, 0, 19.5, 32),
+               poly_p(spine_poly(catmull([(14, 30), (20, 32), (32, 32), (42, 38),
+                                           (44, 50), (38, 62), (26, 68), (14, 64)], 8),
+                                  spine_hw(catmull([(14, 30), (20, 32), (32, 32), (42, 38),
+                                                    (44, 50), (38, 62), (26, 68), (14, 64)], 8),
+                                           5.0, 3.3)))])
+D["6"] = (56, ring_p(29, 50, 20, 20, 11, 13.5)
+          + [poly_p(spine_poly(catmull([(44, 4), (38, 8), (28, 16), (20, 26),
+                                         (15, 36)], 8),
+                                spine_hw(catmull([(44, 4), (38, 8), (28, 16), (20, 26),
+                                                  (15, 36)], 8), 5.0, 3.3)))])
+D["7"] = (56, [rect_p(10, 0, 50, 6.5),
+               poly_p([(44, 6.5), (50, 6.5), (22, 70), (14, 70)])])
+D["8"] = (58, ring_p(29, 20, 22, 20, 13, 13.5) + ring_p(29, 50, 25, 20, 15.5, 13.5))
+D["9"] = (56, ring_p(29, 20, 20, 20, 11, 13.5)
+          + [poly_p(spine_poly(catmull([(14, 66), (20, 62), (30, 54), (38, 44),
+                                         (43, 34)], 8),
+                                spine_hw(catmull([(14, 66), (20, 62), (30, 54), (38, 44),
+                                                  (43, 34)], 8), 5.0, 3.3)))])
+
+# ----------------------------------------------------------- punctuation ----
+P = {}
+P[" "] = (26, [])
+P["."] = (30, [ell_p(15, 66, 4.8, 4.8)])
+P[","] = (30, [ell_p(15, 66, 4.8, 4.8),
+               poly_p(spine_poly(catmull([(15, 68), (13, 76), (9, 82)], 8),
+                                  spine_hw(catmull([(15, 68), (13, 76), (9, 82)], 8),
+                                           4.5, 3.0)))])
+P[":"] = (30, [ell_p(15, 30, 4.8, 4.8), ell_p(15, 66, 4.8, 4.8)])
+P[";"] = (30, [ell_p(15, 30, 4.8, 4.8), ell_p(15, 66, 4.8, 4.8),
+               poly_p(spine_poly(catmull([(15, 68), (13, 76), (9, 82)], 8),
+                                  spine_hw(catmull([(15, 68), (13, 76), (9, 82)], 8),
+                                           4.5, 3.0)))])
+P["'"] = (26, [poly_p([(11, 0), (18, 0), (14, 16), (7, 16)])])
+P['"'] = (44, [poly_p([(5, 0), (12, 0), (8, 16), (1, 16)]),
+               poly_p([(22, 0), (29, 0), (25, 16), (18, 16)])])
+P["!"] = (36, [stem_p(13, 0, 54, 10), ell_p(18, 65, 5, 5)])
+P["?"] = (52, [poly_p(spine_poly(catmull([(16, 14), (20, 4), (30, 0), (40, 4),
+                                           (44, 14), (38, 24), (30, 30), (28, 40)], 8),
+                                  spine_hw(catmull([(16, 14), (20, 4), (30, 0), (40, 4),
+                                                    (44, 14), (38, 24), (30, 30), (28, 40)], 8),
+                                           5.0, 3.3))),
+               rect_p(24, 42, 33, 52), ell_p(28.5, 65, 5, 5)])
+P["-"] = (52, [rect_p(8, 32, 44, 38.5)])
+P["–"] = (60, [rect_p(6, 32, 54, 38.5)])
+P["—"] = (64, [rect_p(4, 32, 58, 38.5)])
+P["·"] = (30, [ell_p(15, 35, 4.5, 4.5)])
+P["%"] = (62, [ell_p(20, 18, 9, 9), ell_p(20, 18, 5, 5, ccw=True),
+               ell_p(42, 52, 9, 9), ell_p(42, 52, 5, 5, ccw=True),
+               poly_p([(50, 4), (56, 4), (10, 66), (4, 66)])])
+P["$"] = (52, s_paths([(38, 8), (30, 2), (20, 3), (14, 10), (13, 18), (18, 25),
+                       (28, 29), (36, 34), (39, 42), (36, 52), (28, 58), (18, 59),
+                       (11, 54)], 5.0, 3.3) + [rect_p(24, -2, 32, 72)])
+P["/"] = (48, [poly_p([(38, 0), (46, 0), (20, 70), (12, 70)])])
+P["("] = (30, [ring_seg(38, 35, 16, 35, 9, 28.5, 110, 250)])
+P[")"] = (30, [ring_seg(14, 35, 16, 35, 9, 28.5, -70, 70)])
+P["+"] = (60, [rect_p(8, 30, 52, 40), rect_p(25, 13, 35, 57)])
+P["="] = (60, [rect_p(8, 26, 52, 32.5), rect_p(8, 44, 52, 50.5)])
+P["°"] = (34, [ell_p(17, 8, 7, 7), ell_p(17, 8, 3.5, 3.5, ccw=True)])
+P["•"] = (30, [ell_p(15, 35, 6, 6)])
+P["~"] = (52, [poly_p(spine_poly(catmull([(6, 38), (14, 30), (22, 38), (30, 30),
+                                           (38, 38), (46, 30)], 8),
+                                  spine_hw(catmull([(6, 38), (14, 30), (22, 38), (30, 30),
+                                                    (38, 38), (46, 30)], 8), 3.2, 2.6)))])
+P["’"] = P["'"]
+P["“"] = P['"']
+P["”"] = P['"']
+
+GLYPHS = {}
+GLYPHS.update(U)
+GLYPHS.update(L)
+GLYPHS.update(D)
+GLYPHS.update(P)
+
+# ------------------------------------------------------- font rasterizer ----
+_SS = 4  # supersampling factor (px per glyph unit in canonical tiles)
+_canonical = {}   # char -> (w, h, minx, miny, alpha bytes, sat)
+_resampled = {}   # (char, cap_px, italic) -> (w, h, alpha bytes, dx, dy)
+_missing = set()
+
+
+def _rasterize_glyph(ch):
+    """Render one glyph to a canonical binary tile at 4 px per unit.
+    Nonzero winding fill. Returns (w, h, minx, miny, alpha, sat)."""
+    adv, subpaths = GLYPHS[ch]
+    polys = flatten_glyph(subpaths)
+    if not polys:
+        return (0, 0, 0.0, 0.0, b"", None)
+    xs = [x for p in polys for x, y in p]
+    ys = [y for p in polys for x, y in p]
+    minx, maxx = min(xs) - 1.0, max(xs) + 1.0
+    miny, maxy = min(ys) - 1.0, max(ys) + 1.0
+    w = int(math.ceil((maxx - minx) * _SS))
+    h = int(math.ceil((maxy - miny) * _SS))
+    alpha = bytearray(w * h)
+    # edges in tile-pixel coords
+    buckets = [[] for _ in range(h)]
+    for poly in polys:
+        n = len(poly)
+        for i in range(n):
+            x0, y0 = poly[i]; x1, y1 = poly[(i + 1) % n]
+            if y0 == y1:
+                continue
+            px0 = (x0 - minx) * _SS; py0 = (y0 - miny) * _SS
+            px1 = (x1 - minx) * _SS; py1 = (y1 - miny) * _SS
+            r0 = max(0, int(math.floor(min(py0, py1))))
+            r1 = min(h, int(math.ceil(max(py0, py1))))
+            for r in range(r0, r1):
+                buckets[r].append((px0, py0, px1, py1))
+    for r in range(h):
+        yc = r + 0.5
+        ev = buckets[r]
+        if not ev:
             continue
-        for i in range(len(pts) - 1):
-            x1, y1, t1 = pts[i]
-            x2, y2, t2 = pts[i + 1]
-            px1 = (x1 + 0.03) * s * SS
-            py1 = y1 * s * SS
-            px2 = (x2 + 0.03) * s * SS
-            py2 = y2 * s * SS
-            half = max(t1, t2) * s * SS / 2.0
-            bx0 = max(0, int(min(px1, px2) - half - 1))
-            bx1 = min(tw - 1, int(max(px1, px2) + half + 1))
-            by0 = max(0, int(min(py1, py2) - half - 1))
-            by1 = min(th - 1, int(max(py1, py2) + half + 1))
-            dx = px2 - px1
-            dy = py2 - py1
-            ln2 = dx * dx + dy * dy
-            for yy in range(by0, by1 + 1):
-                cy2 = yy + 0.5
-                for xx in range(bx0, bx1 + 1):
-                    cx2 = xx + 0.5
-                    if ln2 <= 1e-9:
-                        d = sqrt((cx2 - px1) ** 2 + (cy2 - py1) ** 2)
-                    else:
-                        t = ((cx2 - px1) * dx + (cy2 - py1) * dy) / ln2
-                        t = 0.0 if t < 0 else (1.0 if t > 1 else t)
-                        qx = px1 + t * dx
-                        qy = py1 + t * dy
-                        d = sqrt((cx2 - qx) ** 2 + (cy2 - qy) ** 2)
-                    # per-point thickness (linear interp along segment)
-                    tt = (t1 + (t2 - t1) * t) * s * SS / 2.0 if ln2 > 1e-9 else t1 * s * SS / 2.0
-                    if d <= tt:
-                        buf[yy * tw + xx] = 1.0
-    # downsample SS x SS -> display mask
-    dw = (tw + SS - 1) // SS
-    dh = (th + SS - 1) // SS
-    mask = []
-    for yy in range(dh):
-        row = []
-        for xx in range(dw):
-            tot = 0.0
-            cnt = 0
-            for sy in range(SS):
-                for sx in range(SS):
-                    ix = xx * SS + sx
-                    iy = yy * SS + sy
-                    if ix < tw and iy < th:
-                        tot += buf[iy * tw + ix]
-                        cnt += 1
-            row.append(tot / max(1, cnt))
-        mask.append(row)
-    res = (mask, dw, dh, 0, 0)
-    _glyph_cache[key] = res
-    return res
+        cross = []
+        for px0, py0, px1, py1 in ev:
+            if (py0 <= yc < py1) or (py1 <= yc < py0):
+                cross.append((px0 + (yc - py0) * (px1 - px0) / (py1 - py0),
+                              1 if py1 > py0 else -1))
+        if not cross:
+            continue
+        cross.sort()
+        wind = 0
+        start = None
+        for x, d in cross:
+            prev = wind
+            wind += d
+            if prev == 0 and wind != 0:
+                start = x
+            elif prev != 0 and wind == 0 and start is not None:
+                xa = max(0, int(math.ceil(start))); xb = min(w, int(math.floor(x)) + 1)
+                base = r * w
+                for xx in range(xa, xb):
+                    alpha[base + xx] = 255
+                start = None
+    # summed-area table for fast box resampling
+    sat = [[0] * (w + 1) for _ in range(h + 1)]
+    for y in range(h):
+        rowsum = 0
+        arow = alpha[y * w:(y + 1) * w]
+        srow = sat[y + 1]; sprow = sat[y]
+        for x in range(w):
+            rowsum += arow[x]
+            srow[x + 1] = sprow[x + 1] + rowsum
+    return (w, h, minx, miny, bytes(alpha), sat)
 
 
-def glyph_width(ch, size):
-    spec = GLYPHS.get(ch, GLYPHS["?"])
-    return spec[0] * size
+def _sat_sum(sat, x0, y0, x1, y1):
+    return sat[y1][x1] - sat[y0][x1] - sat[y1][x0] + sat[y0][x0]
 
 
-def text_width(text, size, tracking=0.0):
+def _get_tile(ch, cap, italic):
+    """Resampled alpha tile for (char, cap height px, italic). Returns
+    (w, h, alpha bytes, dx, dy): blit at (pen_x + dx, baseline_y + dy)."""
+    key = (ch, cap, italic)
+    t = _resampled.get(key)
+    if t is not None:
+        return t
+    if ch not in GLYPHS:
+        t = (0, 0, b"", 0.0, 0.0)
+        _resampled[key] = t
+        return t
+    if ch not in _canonical:
+        _canonical[ch] = _rasterize_glyph(ch)
+    cw, chh, minx, miny, _alpha, sat = _canonical[ch]
+    if cw == 0:
+        t = (0, 0, b"", 0.0, 0.0)
+        _resampled[key] = t
+        return t
+    scale = cap / 70.0
+    k = _SS / scale  # canonical px per output px
+    ow = max(1, int(round(cw / k)))
+    oh = max(1, int(round(chh / k)))
+    shear = 0.16 if italic else 0.0
+    base_c = (0.0 - miny) * _SS  # baseline row in canonical px
+    out = bytearray(ow * oh)
+    for j in range(oh):
+        yc = (j + 0.5) * k
+        shift = shear * (base_c - yc)
+        sy0 = int(max(0, math.floor(j * k))); sy1 = int(min(chh, math.ceil((j + 1) * k)))
+        for i in range(ow):
+            sx0 = i * k + shift; sx1 = (i + 1) * k + shift
+            x0 = int(max(0, math.floor(sx0))); x1 = int(min(cw, math.ceil(sx1)))
+            if x1 <= x0 or sy1 <= sy0:
+                continue
+            s = _sat_sum(sat, x0, sy0, x1, sy1)
+            area = (x1 - x0) * (sy1 - sy0)
+            a = int(round(255.0 * s / (255.0 * area)))
+            if a:
+                out[j * ow + i] = a if a < 255 else 255
+    t = (ow, oh, bytes(out), minx * scale, miny * scale)
+    _resampled[key] = t
+    return t
+
+
+def glyph_adv(ch):
+    g = GLYPHS.get(ch)
+    if g is None:
+        if ch not in _missing:
+            _missing.add(ch)
+            print("WARN missing glyph for", repr(ch))
+        return 26.0
+    return g[0]
+
+
+def text_width(s, cap, tracking=0.0):
     w = 0.0
-    for ch in text:
-        if ch == " ":
-            w += size * 0.30
-        else:
-            w += glyph_width(ch, size) + tracking
-    return w - tracking if text else 0.0
+    for ch in s:
+        w += glyph_adv(ch) * cap / 70.0 + tracking
+    return w - tracking if s else 0.0
 
 
-def draw_text(cv, x, y, text, size, color, tracking=0.0, italic=False,
-              align="left"):
-    """Draw text; y = top of cap height. Returns width drawn."""
+def draw_text(cv, s, x, y_top, cap, color, align="left", tracking=0.0,
+              italic=False, max_w=None):
+    """Draw text; y_top = top of cap-height box. Returns (width used, right x)."""
+    w = text_width(s, cap, tracking)
     if align == "center":
-        x -= text_width(text, size, tracking) / 2
+        x = x - w / 2.0
     elif align == "right":
-        x -= text_width(text, size, tracking)
-    cx = float(x)
-    for ch in text:
+        x = x - w
+    if max_w is not None and w > max_w:
+        # shrink tracking only, never below cap (caller must size text)
+        pass
+    scale = cap / 70.0
+    baseline = y_top + cap
+    pen = x
+    for ch in s:
         if ch == " ":
-            cx += size * 0.30 + tracking
+            pen += glyph_adv(ch) * scale + tracking
             continue
-        mask, dw, dh, _, _ = render_glyph(ch, size)
-        for yy in range(dh):
-            shear = int(0.16 * size * (yy / max(1, dh))) if italic else 0
-            for xx in range(dw):
-                a = mask[yy][xx]
-                if a > 0.0:
-                    cv.blend(int(cx) + xx + shear, int(y) + yy, color, a)
-        cx += glyph_width(ch, size) + tracking
-    return cx - x
+        tw, th, alpha, dx, dy = _get_tile(ch, cap, italic)
+        if tw:
+            bx = int(round(pen + dx)); by = int(round(y_top + dy))
+            for j in range(th):
+                row = j * tw
+                yy = by + j
+                if yy < 0 or yy >= cv.h:
+                    continue
+                for i in range(tw):
+                    a = alpha[row + i]
+                    if a:
+                        cv.blend(bx + i, yy, color, a)
+        pen += glyph_adv(ch) * scale + tracking
+    return w, pen
 
 
-def wrap_text(text, size, max_w, tracking=0.0):
-    """Greedy wrap into lines fitting max_w. Returns list of lines."""
-    words = text.split(" ")
+def wrap_text(s, cap, max_w, tracking=0.0):
+    """Greedy word wrap. Returns list of lines (strings)."""
+    words = s.split(" ")
     lines = []
     cur = ""
     for wd in words:
-        trial = (cur + " " + wd).strip()
-        if text_width(trial, size, tracking) <= max_w or not cur:
+        trial = wd if not cur else cur + " " + wd
+        if text_width(trial, cap, tracking) <= max_w or not cur:
             cur = trial
         else:
             lines.append(cur)
@@ -382,741 +765,711 @@ def wrap_text(text, size, max_w, tracking=0.0):
     return lines
 
 
-# ---------------------------------------------------------------- glyphs
-def _v(x, y0=0.0, y1=1.0, t=TV):
-    return ("L", (x, y0, x, y1), t)
+def draw_para(cv, s, x, y_top, cap, color, max_w, line_h, tracking=0.0,
+              italic=False, align="left", max_lines=None):
+    """Draw wrapped paragraph. Returns bottom y (after last line)."""
+    lines = wrap_text(s, cap, max_w, tracking)
+    if max_lines is not None:
+        lines = lines[:max_lines]
+    y = y_top
+    for ln in lines:
+        draw_text(cv, ln, x, y, cap, color, align=align, tracking=tracking,
+                  italic=italic)
+        y += line_h
+    return y
+
+# ------------------------------------------------------------- scenes ----
+INK = hx("#141414")
+PAPER = hx("#f7f3e8")
+NAVY = hx("#1a2b4a")
+RED = hx("#a32c22")
+GOLD = hx("#c9a227")
+GREY = hx("#6b6b66")
 
 
-def _h(x0, x1, y, t=TH):
-    return ("L", (x0, y, x1, y), t)
+def sky(cv, x, y, w, h, c1, c2, c3=None):
+    if c3 is None:
+        cv.vgrad(x, y, x + w, y + h, c1, c2)
+    else:
+        cv.vgrad(x, y, x + w, y + h * 0.55, c1, c2)
+        cv.vgrad(x, y + h * 0.55, x + w, y + h, c2, c3)
 
 
-def _d(x1, y1, x2, y2, t=TD):
-    return ("L", (x1, y1, x2, y2), t)
+def building(cv, x, y, w, h, c, win, lit=0.7):
+    cv.rect(x, y, x + w, y + h, c)
+    for wy in range(int(y + 5), int(y + h - 4), 9):
+        for wx in range(int(x + 4), int(x + w - 4), 8):
+            if ((wx * 7 + wy * 13) % 10) < int(lit * 10):
+                cv.rect(wx, wy, wx + 3, wy + 4, win)
 
 
-def _a(cx, cy, rx, ry, a0, a1, t=("var", TV, TH)):
-    return ("A", (cx, cy, rx, ry, a0, a1), t)
+def person(cv, x, y, s, c):
+    cv.disc(x, y - 3.2 * s, 1.6 * s, c)
+    cv.rect(x - 1.4 * s, y - 1.6 * s, x + 1.4 * s, y + 2.6 * s, c)
 
 
-def _b(x1, y1, c1x, c1y, c2x, c2y, x2, y2, t=TD):
-    return ("B", (x1, y1, c1x, c1y, c2x, c2y, x2, y2), t)
+def flag(cv, x, y, w, h, c1, c2=None):
+    cv.rect(x, y, x + 1.2, y + h + 6, INK)
+    cv.rect(x + 1.2, y, x + w, y + h * 0.55, c1)
+    if c2:
+        cv.rect(x + 1.2, y + h * 0.55, x + w, y + h, c2)
 
 
-def _o(cx, cy, rx, ry):
-    return ("A", (cx, cy, rx, ry, 0, 360), ("var", TV, TH))
+def cloud(cv, x, y, s, c):
+    cv.disc(x, y, 2.2 * s, c)
+    cv.disc(x + 2.4 * s, y + 0.6 * s, 1.8 * s, c)
+    cv.disc(x - 2.4 * s, y + 0.7 * s, 1.7 * s, c)
 
 
-def _dot(cx, cy, r=0.07):
-    return ("D", (cx, cy, r), 0)
+def smoke(cv, x, y, s, c):
+    cv.disc(x, y, 3.0 * s, c)
+    cv.disc(x + 2.5 * s, y - 2.5 * s, 2.2 * s, c)
+    cv.disc(x + 5 * s, y - 5 * s, 1.8 * s, c)
 
 
-# S spine (critical): two curved lobes, upper smaller than lower.
-# Each lobe is an arc (thick, uniform) joined by a diagonal sweep.
-S_TOP = [
-    _a(0.36, 0.26, 0.24, 0.20, 30, 230, 0.12),
-    _b(0.21, 0.41, 0.30, 0.50, 0.42, 0.48, 0.51, 0.56, 0.12),
-    _a(0.36, 0.74, 0.26, 0.22, 55, -175, 0.12),
-]
-S_LOW = [
-    _a(0.32, 0.48, 0.21, 0.17, 30, 230, 0.10),
-    _b(0.19, 0.61, 0.26, 0.68, 0.36, 0.66, 0.45, 0.65, 0.10),
-    _a(0.32, 0.80, 0.22, 0.18, 55, -175, 0.10),
-]
-
-GLYPHS = {}
-# ---- capitals
-GLYPHS["A"] = (0.78, [_d(0.10, 1.0, 0.39, 0.0), _d(0.68, 1.0, 0.39, 0.0),
-                     _h(0.24, 0.54, 0.68), _serif(0.10, 1.0), _serif(0.68, 1.0)])
-GLYPHS["B"] = (0.68, [_v(0.12), _serif(0.12, 0.0), _serif(0.12, 1.0),
-                      _a(0.34, 0.25, 0.24, 0.25, -90, 90, ("var", TV, TH)),
-                      _a(0.36, 0.75, 0.26, 0.25, -90, 90, ("var", TV, TH)),
-                      _h(0.12, 0.36, 0.50, TH)])
-GLYPHS["C"] = (0.72, [_a(0.38, 0.50, 0.32, 0.50, 55, 305)])
-GLYPHS["D"] = (0.74, [_v(0.12), _serif(0.12, 0.0), _serif(0.12, 1.0),
-                      _a(0.14, 0.50, 0.34, 0.50, -90, 90, ("var", TV, TH)),
-                      _h(0.12, 0.20, 0.0, TH), _h(0.12, 0.20, 1.0, TH)])
-GLYPHS["E"] = (0.62, [_v(0.12), _serif(0.12, 0.0), _serif(0.12, 1.0),
-                      _h(0.12, 0.56, 0.0), _h(0.12, 0.48, 0.50), _h(0.12, 0.56, 1.0)])
-GLYPHS["F"] = (0.58, [_v(0.12), _serif(0.12, 0.0), _serif(0.12, 1.0),
-                      _h(0.12, 0.54, 0.0), _h(0.12, 0.46, 0.50)])
-GLYPHS["G"] = (0.76, [_a(0.40, 0.50, 0.33, 0.50, 55, 305),
-                      _h(0.42, 0.70, 0.58, TH), _v(0.66, 0.58, 0.86, TV)])
-GLYPHS["H"] = (0.74, [_v(0.12), _v(0.62), _serif(0.12, 0.0), _serif(0.12, 1.0),
-                      _serif(0.62, 0.0), _serif(0.62, 1.0), _h(0.12, 0.62, 0.52)])
-GLYPHS["I"] = (0.34, [_v(0.17), _h(0.06, 0.28, 0.0, 0.06), _h(0.06, 0.28, 1.0, 0.06)])
-GLYPHS["J"] = (0.52, [_h(0.14, 0.46, 0.0, 0.06), _v(0.36, 0.0, 0.82),
-                      _a(0.24, 0.82, 0.12, 0.16, -90, 180, TD)])
-GLYPHS["K"] = (0.70, [_v(0.12), _serif(0.12, 0.0), _serif(0.12, 1.0),
-                      _d(0.42, 0.52, 0.14, 0.52, TD), _d(0.36, 0.48, 0.66, 1.0, TD)])
-GLYPHS["L"] = (0.58, [_v(0.12), _serif(0.12, 0.0), _h(0.12, 0.54, 1.0)])
-GLYPHS["M"] = (0.88, [_v(0.10), _v(0.78), _d(0.10, 0.0, 0.44, 0.52, TD),
-                      _d(0.78, 0.0, 0.44, 0.52, TD), _serif(0.10, 1.0), _serif(0.78, 1.0)])
-GLYPHS["N"] = (0.76, [_v(0.12), _v(0.64), _d(0.12, 0.0, 0.64, 1.0, TD),
-                      _serif(0.12, 1.0), _serif(0.64, 1.0)])
-GLYPHS["O"] = (0.80, [_o(0.40, 0.50, 0.34, 0.50)])
-GLYPHS["P"] = (0.64, [_v(0.12), _serif(0.12, 0.0), _serif(0.12, 1.0),
-                      _a(0.14, 0.27, 0.26, 0.27, -90, 90, ("var", TV, TH)),
-                      _h(0.12, 0.16, 0.54, TH)])
-GLYPHS["Q"] = (0.80, [_o(0.40, 0.50, 0.34, 0.50), _d(0.58, 0.78, 0.74, 1.02, TD)])
-GLYPHS["R"] = (0.68, [_v(0.12), _serif(0.12, 0.0), _serif(0.12, 1.0),
-                      _a(0.14, 0.27, 0.26, 0.27, -90, 90, ("var", TV, TH)),
-                      _h(0.12, 0.16, 0.54, TH), _d(0.38, 0.52, 0.66, 1.0, TD)])
-GLYPHS["S"] = (0.70, S_TOP)
-GLYPHS["T"] = (0.66, [_h(0.06, 0.60, 0.0), _v(0.33), _serif(0.33, 1.0)])
-GLYPHS["U"] = (0.74, [_v(0.12, 0.0, 0.78), _v(0.62, 0.0, 0.78),
-                      _a(0.37, 0.78, 0.25, 0.22, 180, 360, ("var", TH, TH)),
-                      _serif(0.12, 0.0), _serif(0.62, 0.0)])
-GLYPHS["V"] = (0.74, [_d(0.08, 0.0, 0.37, 1.0, TD), _d(0.66, 0.0, 0.37, 1.0, TD),
-                      _serif(0.08, 0.0), _serif(0.66, 0.0)])
-GLYPHS["W"] = (0.96, [_d(0.06, 0.0, 0.26, 1.0, TD), _d(0.26, 1.0, 0.48, 0.0, TD),
-                      _d(0.48, 0.0, 0.70, 1.0, TD), _d(0.70, 1.0, 0.90, 0.0, TD)])
-GLYPHS["X"] = (0.70, [_d(0.10, 0.0, 0.60, 1.0, TD), _d(0.60, 0.0, 0.10, 1.0, TD)])
-GLYPHS["Y"] = (0.68, [_d(0.08, 0.0, 0.34, 0.52, TD), _d(0.60, 0.0, 0.34, 0.52, TD),
-                      _v(0.34, 0.52, 1.0), _serif(0.34, 1.0)])
-GLYPHS["Z"] = (0.66, [_h(0.08, 0.58, 0.0), _h(0.08, 0.58, 1.0),
-                      _d(0.58, 0.0, 0.08, 1.0, TD)])
-# ---- lowercase (x-height top 0.30, baseline 1.0)
-GLYPHS["a"] = (0.60, [_o(0.29, 0.65, 0.23, 0.35), _v(0.54, 0.30, 1.0),
-                      _h(0.28, 0.54, 0.32, TH), _serif(0.54, 1.0)])
-GLYPHS["b"] = (0.58, [_v(0.12, 0.0, 1.0), _o(0.32, 0.65, 0.22, 0.35),
-                      _serif(0.12, 1.0)])
-GLYPHS["c"] = (0.56, [_a(0.30, 0.65, 0.24, 0.35, 55, 305)])
-GLYPHS["d"] = (0.58, [_o(0.26, 0.65, 0.22, 0.35), _v(0.50, 0.0, 1.0),
-                      _serif(0.50, 1.0)])
-GLYPHS["e"] = (0.58, [_a(0.30, 0.68, 0.25, 0.32, -35, 295),
-                      _h(0.07, 0.55, 0.68, TH)])
-GLYPHS["f"] = (0.40, [_v(0.22, 0.10, 1.0), _a(0.22, 0.18, 0.12, 0.16, 0, 180, TD),
-                      _h(0.08, 0.34, 0.55, TH)])
-GLYPHS["g"] = (0.60, [_o(0.29, 0.65, 0.23, 0.35), _v(0.54, 0.30, 1.24),
-                      _a(0.42, 1.24, 0.12, 0.10, 180, 360, TD)])
-GLYPHS["h"] = (0.56, [_v(0.12, 0.0, 1.0), _v(0.44, 0.52, 1.0),
-                      _a(0.28, 0.52, 0.16, 0.22, 0, 180, ("var", TV, TH)),
-                      _serif(0.12, 1.0)])
-GLYPHS["i"] = (0.28, [_v(0.14, 0.30, 1.0), _dot(0.14, 0.14, 0.065), _serif(0.14, 1.0)])
-GLYPHS["j"] = (0.32, [_v(0.16, 0.30, 1.16), _a(0.10, 1.16, 0.08, 0.10, 180, 360, TD),
-                      _dot(0.16, 0.14, 0.065)])
-GLYPHS["k"] = (0.56, [_v(0.12, 0.0, 1.0), _d(0.40, 0.62, 0.14, 0.62, TD),
-                      _d(0.34, 0.60, 0.52, 1.0, TD), _serif(0.12, 1.0)])
-GLYPHS["l"] = (0.28, [_v(0.14, 0.0, 1.0), _serif(0.14, 1.0)])
-GLYPHS["m"] = (0.84, [_v(0.10, 0.30, 1.0), _v(0.40, 0.52, 1.0), _v(0.72, 0.52, 1.0),
-                      _a(0.25, 0.52, 0.15, 0.22, 0, 180, ("var", TV, TH)),
-                      _a(0.56, 0.52, 0.16, 0.22, 0, 180, ("var", TV, TH))])
-GLYPHS["n"] = (0.56, [_v(0.12, 0.30, 1.0), _v(0.44, 0.52, 1.0),
-                      _a(0.28, 0.52, 0.16, 0.22, 0, 180, ("var", TV, TH)),
-                      _serif(0.12, 1.0)])
-GLYPHS["o"] = (0.58, [_o(0.29, 0.65, 0.23, 0.35)])
-GLYPHS["p"] = (0.58, [_v(0.12, 0.30, 1.28), _o(0.32, 0.65, 0.22, 0.35)])
-GLYPHS["q"] = (0.58, [_o(0.26, 0.65, 0.22, 0.35), _v(0.50, 0.30, 1.28)])
-GLYPHS["r"] = (0.42, [_v(0.12, 0.30, 1.0), _a(0.24, 0.52, 0.12, 0.20, 0, 160, TD),
-                      _serif(0.12, 1.0)])
-GLYPHS["s"] = (0.58, S_LOW)
-GLYPHS["t"] = (0.40, [_v(0.20, 0.08, 1.0), _h(0.06, 0.34, 0.55, TH),
-                      _a(0.20, 0.92, 0.10, 0.10, 180, 270, TD), _serif(0.20, 0.0)])
-GLYPHS["u"] = (0.56, [_v(0.12, 0.30, 0.82), _v(0.44, 0.30, 0.82),
-                      _a(0.28, 0.82, 0.16, 0.18, 180, 360, ("var", TH, TH)),
-                      _serif(0.44, 0.30)])
-GLYPHS["v"] = (0.56, [_d(0.08, 0.30, 0.28, 1.0, TD), _d(0.48, 0.30, 0.28, 1.0, TD)])
-GLYPHS["w"] = (0.80, [_d(0.06, 0.30, 0.21, 1.0, TD), _d(0.21, 1.0, 0.40, 0.30, TD),
-                      _d(0.40, 0.30, 0.59, 1.0, TD), _d(0.59, 1.0, 0.74, 0.30, TD)])
-GLYPHS["x"] = (0.54, [_d(0.08, 0.30, 0.46, 1.0, TD), _d(0.46, 0.30, 0.08, 1.0, TD)])
-GLYPHS["y"] = (0.56, [_d(0.08, 0.30, 0.28, 0.82, TD), _d(0.48, 0.30, 0.28, 0.82, TD),
-                      _d(0.28, 0.82, 0.14, 1.28, TD)])
-GLYPHS["z"] = (0.52, [_h(0.08, 0.46, 0.30, TH), _h(0.08, 0.46, 1.0, TH),
-                      _d(0.46, 0.30, 0.08, 1.0, TD)])
-# ---- digits
-GLYPHS["0"] = (0.66, [_o(0.33, 0.50, 0.27, 0.50)])
-GLYPHS["1"] = (0.40, [_d(0.12, 0.22, 0.24, 0.02, TD), _v(0.24, 0.02, 1.0),
-                      _h(0.10, 0.36, 1.0, 0.06)])
-GLYPHS["2"] = (0.64, [_b(0.12, 0.52, 0.08, 0.08, 0.30, -0.02, 0.50, 0.10, TD),
-                      _b(0.50, 0.10, 0.62, 0.22, 0.50, 0.44, 0.30, 0.62, TD),
-                      _d(0.30, 0.62, 0.08, 1.0, TD), _h(0.08, 0.58, 1.0, TH)])
-GLYPHS["3"] = (0.64, [_a(0.34, 0.26, 0.24, 0.26, -80, 110, ("var", TV, TH)),
-                      _a(0.34, 0.74, 0.26, 0.26, -80, 110, ("var", TV, TH))])
-GLYPHS["4"] = (0.66, [_d(0.48, 0.0, 0.10, 0.68, TD), _h(0.08, 0.56, 0.68, TH),
-                      _v(0.44, 0.0, 1.0)])
-GLYPHS["5"] = (0.62, [_h(0.10, 0.54, 0.0, TH), _v(0.12, 0.0, 0.52),
-                      _a(0.34, 0.74, 0.24, 0.26, 160, 380, ("var", TV, TH))])
-GLYPHS["6"] = (0.64, [_b(0.52, 0.02, 0.28, 0.08, 0.10, 0.30, 0.12, 0.58, TD),
-                      _a(0.32, 0.68, 0.24, 0.30, 90, 430, ("var", TV, TH))])
-GLYPHS["7"] = (0.62, [_h(0.08, 0.56, 0.0, TH), _d(0.56, 0.0, 0.22, 1.0, TD)])
-GLYPHS["8"] = (0.66, [_o(0.33, 0.27, 0.24, 0.27), _o(0.33, 0.73, 0.26, 0.27)])
-GLYPHS["9"] = (0.64, [_a(0.32, 0.38, 0.26, 0.38, 0, 320, ("var", TV, TH)),
-                      _v(0.56, 0.30, 1.0)])
-# ---- punctuation
-GLYPHS["."] = (0.30, [_dot(0.15, 0.94, 0.075)])
-GLYPHS[","] = (0.30, [_dot(0.15, 0.92, 0.07),
-                      _b(0.20, 0.94, 0.18, 1.06, 0.10, 1.12, 0.06, 1.22, 0.07)])
-GLYPHS[":"] = (0.30, [_dot(0.15, 0.36, 0.07), _dot(0.15, 0.86, 0.07)])
-GLYPHS[";"] = (0.30, [_dot(0.15, 0.36, 0.07), _dot(0.15, 0.86, 0.07),
-                      _b(0.20, 0.90, 0.18, 1.04, 0.10, 1.10, 0.06, 1.20, 0.07)])
-GLYPHS["'"] = (0.28, [_d(0.16, 0.02, 0.10, 0.30, 0.09)])
-GLYPHS['"'] = (0.44, [_d(0.14, 0.02, 0.08, 0.30, 0.09), _d(0.34, 0.02, 0.28, 0.30, 0.09)])
-GLYPHS["%"] = (0.92, [_o(0.22, 0.24, 0.14, 0.24), _o(0.70, 0.76, 0.14, 0.24),
-                      _d(0.78, 0.02, 0.14, 0.98, 0.09)])
-GLYPHS["$"] = (0.62, [_a(0.31, 0.28, 0.19, 0.19, 30, 230, 0.11),
-                      _b(0.18, 0.43, 0.26, 0.50, 0.36, 0.48, 0.44, 0.54, 0.11),
-                      _a(0.31, 0.70, 0.21, 0.20, 55, -175, 0.11),
-                      _v(0.31, -0.08, 1.08, 0.09)])
-GLYPHS["/"] = (0.44, [_d(0.36, 0.0, 0.08, 1.0, TD)])
-GLYPHS["-"] = (0.44, [_h(0.06, 0.38, 0.52, TH)])
-GLYPHS["("] = (0.34, [_a(0.30, 0.50, 0.16, 0.50, 60, 300, TD)])
-GLYPHS[")"] = (0.34, [_a(0.04, 0.50, 0.16, 0.50, -120, 120, TD)])
-GLYPHS["."] = (0.30, [_dot(0.15, 0.94, 0.075)])
-GLYPHS["\u00b7"] = (0.30, [_dot(0.15, 0.48, 0.07)])
-GLYPHS["\u2014"] = (0.90, [_h(0.04, 0.86, 0.52, TH)])
-GLYPHS["!"] = (0.30, [_v(0.15, 0.0, 0.72, TV), _dot(0.15, 0.92, 0.07)])
-GLYPHS["?"] = (0.56, [_a(0.28, 0.28, 0.22, 0.26, -40, 220, TD),
-                      _b(0.28, 0.50, 0.28, 0.62, 0.24, 0.68, 0.24, 0.76, 0.11),
-                      _dot(0.24, 0.92, 0.07)])
-GLYPHS["+"] = (0.56, [_h(0.06, 0.50, 0.50, TH), _v(0.28, 0.24, 0.76, TV)])
-GLYPHS["="] = (0.56, [_h(0.06, 0.50, 0.38, TH), _h(0.06, 0.50, 0.66, TH)])
-GLYPHS["?"] = (0.56, [_a(0.28, 0.28, 0.22, 0.26, -40, 220, TD),
-                      _b(0.28, 0.50, 0.28, 0.62, 0.24, 0.68, 0.24, 0.76, 0.11),
-                      _dot(0.24, 0.92, 0.07)])
+def star(cv, x, y, r=1.2):
+    cv.disc(x, y, r, hx("#fff6d8"))
 
 
-# ---------------------------------------------------------------- illustrations
-def _arc_seg(cv, cx, cy, r, a0, a1, th, c):
-    """Thick arc segment (angles deg, 0=east, 90=up in screen coords)."""
-    import math
-    n = max(4, int(abs(a1 - a0) / 6) + 1)
-    pts = []
+def drone(cv, x, y, s, c):
+    cv.ellipse(x, y, 2.6 * s, 1.1 * s, c)
+    cv.disc(x - 2.8 * s, y - 1.2 * s, 0.9 * s, c)
+    cv.disc(x + 2.8 * s, y - 1.2 * s, 0.9 * s, c)
+    cv.disc(x, y + 1.6 * s, 0.8 * s, hx("#ff5a3c"))
+
+
+def arc_strip(cv, cx, cy, r, wdt, a0, a1, c, n=48):
+    """Thick arc as a polygon strip (for donut charts)."""
+    pts_o, pts_i = [], []
     for i in range(n + 1):
         a = math.radians(a0 + (a1 - a0) * i / n)
-        pts.append((cx + r * math.cos(a), cy - r * math.sin(a)))
-    for i in range(len(pts) - 1):
-        cv.thick_line(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], th, c)
+        pts_o.append((cx + (r + wdt / 2) * math.cos(a), cy + (r + wdt / 2) * math.sin(a)))
+        pts_i.append((cx + (r - wdt / 2) * math.cos(a), cy + (r - wdt / 2) * math.sin(a)))
+    cv.poly(pts_o + pts_i[::-1], c)
 
 
-def _windows(cv, x, y, w, h, cols, rows, lit, c=(250, 210, 90)):
-    cw = w / cols
-    chh = h / rows
-    for r in range(rows):
-        for cc in range(cols):
-            if (r * cols + cc) % 3 != 2 or lit:
-                cv.rect(x + cc * cw + 2, y + r * chh + 2,
-                        max(2, cw - 4), max(2, chh - 4), c)
+def donut(cv, cx, cy, r, pct, c, bgc):
+    cv.ring(cx, cy, r, r - 5, bgc)
+    arc_strip(cv, cx, cy, r - 2.5, 5, -90, -90 + 360 * pct / 100.0, c)
 
 
-def hero_cop31(cv, x, y, w, h):
-    cv.vgrad(x, y, w, 40, (96, 84, 66), (120, 106, 84))          # ceiling
-    cv.vgrad(x, y + 40, w, h - 40, (236, 226, 202), (214, 200, 172))  # wall
-    for lx in (x + w * 0.25, x + w * 0.75):                       # lamps
-        cv.thick_line(lx, y + 2, lx, y + 22, 2, (60, 50, 40))
-        cv.circle(lx, y + 28, 7, (255, 220, 120))
-        cv.circle(lx, y + 28, 4, (255, 240, 170))
-    cv.circle(x + w - 26, y + 52, 11, (252, 249, 240))            # clock
-    cv.thick_line(x + w - 26, y + 52, x + w - 26, y + 44, 2, INK)
-    cv.thick_line(x + w - 26, y + 52, x + w - 20, y + 52, 2, INK)
-    cv.rect(x + 14, y + 48, w - 28, 26, RED)                      # NO DEAL banner
-    draw_text(cv, x + w / 2, y + 51, "NO DEAL", 20, WHITE, align="center")
-    for i, fx in enumerate((0.14, 0.32, 0.68, 0.86)):             # flags
-        px = x + w * fx
-        cv.thick_line(px, y + 78, px, y + 104, 2, (70, 60, 50))
-        cv.rect(px, y + 78, 16, 10, [(30, 90, 160), (200, 40, 40),
-                                     (40, 140, 60), (240, 200, 40)][i])
-    cv.rect(x + 8, y + 108, w - 16, h - 108, (122, 88, 56))       # table
-    cv.rect(x + 8, y + 108, w - 16, 4, (150, 112, 70))
-    skins = [(232, 190, 150), (190, 140, 100), (240, 200, 160),
-             (200, 150, 110), (235, 195, 155), (180, 130, 95)]
-    suits = [(30, 50, 90), (90, 30, 30), (40, 90, 50),
-             (120, 90, 30), (70, 70, 110), (30, 90, 90)]
-    for i in range(6):
-        cx = x + w * (0.10 + i * 0.16)
-        cv.circle(cx, y + 96, 7, skins[i])
-        cv.poly([(cx - 11, y + 104), (cx + 11, y + 104),
-                 (cx + 8, y + 120), (cx - 8, y + 120)], suits[i])
-        cv.rect(cx - 6, y + 112, 12, 5, WHITE)
-    cv.rect(x + w * 0.42, y + 128, 34, 10, WHITE)                # papers
-    cv.rect(x + w * 0.42, y + 131, 28, 1, GREY)
+def scene_cop31(cv, x, y, w, h):
+    sky(cv, x, y, w, h, hx("#dfe9f2"), hx("#f2e7c9"), hx("#e8d9a8"))
+    # ceiling lamps
+    for lx in (x + w * 0.2, x + w * 0.5, x + w * 0.8):
+        cv.line(lx, y, lx, y + 10, 1.5, INK)
+        cv.ellipse(lx, y + 13, 9, 3.5, hx("#ffd97a"))
+    # wall clock
+    cv.disc(x + w - 22, y + 16, 8, PAPER)
+    cv.ring(x + w - 22, y + 16, 8, 6.5, INK)
+    cv.line(x + w - 22, y + 16, x + w - 18, y + 12, 1.2, INK)
+    # long table + delegates
+    ty = y + h - 34
+    cv.rect(x + 8, ty, x + w - 8, ty + 22, hx("#7a4a2b"))
+    cv.rect(x + 8, ty, x + w - 8, ty + 4, hx("#9a6a3b"))
+    cols = [hx("#1a2b4a"), hx("#a32c22"), hx("#2a6b3c"), hx("#c9a227"),
+            hx("#5b3a7a"), hx("#2b7a8c")]
+    for i, c in enumerate(cols):
+        px = x + 22 + i * (w - 44) / 5
+        person(cv, px, ty - 2, 3.2, c)
+        cv.rect(px - 6, ty - 26, px + 6, ty - 24, PAPER)
+    # flags behind
+    for i, c in enumerate([hx("#1a2b4a"), hx("#a32c22"), hx("#2a6b3c"), hx("#c9a227")]):
+        flag(cv, x + 30 + i * 62, y + h - 78, 16, 9, c, PAPER)
+    # NO DEAL banner
+    cv.rect(x + w * 0.32, y + 30, x + w * 0.68, y + 48, RED)
+    draw_text(cv, "NO DEAL", x + w * 0.5, y + 32, 13, PAPER, align="center", tracking=0.5)
 
 
-def hero_kyiv(cv, x, y, w, h):
-    cv.vgrad(x, y, w, h, (8, 14, 36), (46, 56, 96))
-    for sx, sy in ((0.08, 0.10), (0.22, 0.06), (0.38, 0.14), (0.52, 0.05),
-                   (0.66, 0.12), (0.80, 0.07), (0.92, 0.16), (0.15, 0.22),
-                   (0.45, 0.20), (0.72, 0.22), (0.30, 0.03), (0.86, 0.26)):
-        cv.disc(x + w * sx, y + h * sy, 1, WHITE)
-    cv.circle(x + w * 0.85, y + 22, 11, (240, 236, 210))          # moon
-    cv.circle(x + w * 0.85, y + 22, 8, (250, 248, 232))
-    for dx, dy in ((0.30, 0.30), (0.55, 0.22), (0.78, 0.32)):     # drones
-        cx, cy = x + w * dx, y + h * dy
-        cv.ellipse(cx, cy, 7, 2, (10, 10, 14))
-        cv.disc(cx, cy, 1, (255, 60, 50))
-    for bx, by in ((0.62, 0.18), (0.88, 0.12)):                   # searchlights
-        cv.poly([(x + w * bx, y + h * 0.95), (x + w * (bx - 0.10), y + h * 0.30),
-                 (x + w * (bx - 0.04), y + h * 0.30)], (150, 170, 210))
-    bld = [(0.02, 0.55, 0.16, 0.45), (0.20, 0.42, 0.18, 0.58),
-           (0.40, 0.48, 0.16, 0.52), (0.58, 0.36, 0.18, 0.64),
-           (0.78, 0.50, 0.20, 0.50)]
-    for bx, by, bw, bh in bld:
-        cv.rect(x + w * bx, y + h * by, w * bw, h * bh, (16, 18, 30))
-        _windows(cv, x + w * bx + 4, y + h * by + 6, w * bw - 8, h * bh - 12,
-                 3, 5, False)
-    cv.ellipse(x + w * 0.49, y + h * 0.92, 34, 10, (255, 120, 30))  # fire glow
-    cv.poly([(x + w * 0.44, y + h * 0.98), (x + w * 0.49, y + h * 0.78),
-             (x + w * 0.54, y + h * 0.98)], (255, 90, 20))
-    cv.poly([(x + w * 0.47, y + h * 0.98), (x + w * 0.49, y + h * 0.86),
-             (x + w * 0.51, y + h * 0.98)], (255, 210, 60))
-    for sx, sy, sr in ((0.47, 0.70, 9), (0.51, 0.60, 12), (0.46, 0.50, 10)):
-        cv.circle(x + w * sx, y + h * sy, sr, (90, 90, 100))
-    cv.rect(x, y + h - 4, w, 4, (8, 10, 20))
+def scene_kyiv(cv, x, y, w, h):
+    sky(cv, x, y, w, h, hx("#0d1530"), hx("#2a2a55"), hx("#4a2a4a"))
+    for i in range(9):
+        sx = x + 12 + (i * 37) % (w - 24)
+        sy = y + 8 + (i * 23) % 34
+        star(cv, sx, sy, 1.1)
+    cv.disc(x + w - 30, y + 16, 9, hx("#f2e6b8"))
+    # searchlights
+    cv.poly([(x + 60, y + h - 8), (x + 52, y + h - 8), (x + 30, y + 6)], hx("#ffe9a8"))
+    cv.poly([(x + w - 70, y + h - 8), (x + w - 62, y + h - 8), (x + w - 30, y + 8)], hx("#ffe9a8"))
+    # buildings
+    bw = [52, 44, 60, 40, 48]
+    bx = x + 6
+    for i, bwid in enumerate(bw):
+        bh = 52 + ((i * 17) % 30)
+        building(cv, bx, y + h - 8 - bh, bwid, bh, hx("#141c33"),
+                 hx("#ffd97a"), lit=0.65)
+        bx += bwid + 4
+    # fire glow + smoke on one building
+    cv.disc(x + w * 0.62, y + h - 46, 12, hx("#ff7a2a"))
+    cv.disc(x + w * 0.62, y + h - 46, 6, hx("#ffd23c"))
+    smoke(cv, x + w * 0.62, y + h - 62, 2.2, hx("#8a8a92"))
+    drone(cv, x + w * 0.25, y + 26, 1.6, hx("#c8c8d8"))
+    drone(cv, x + w * 0.5, y + 18, 1.4, hx("#c8c8d8"))
+    drone(cv, x + w * 0.78, y + 30, 1.5, hx("#c8c8d8"))
 
 
-def hero_manama(cv, x, y, w, h):
-    cv.vgrad(x, y, w, h - 26, (244, 150, 84), (128, 74, 142))
-    cv.circle(x + w * 0.78, y + 30, 13, (255, 226, 150))          # sun
-    cv.rect(x, y + h - 26, w, 26, (28, 78, 128))                  # sea
-    cv.hline(x + 8, y + h - 18, 60, (120, 170, 220), 2)
-    cv.hline(x + w - 80, y + h - 12, 70, (120, 170, 220), 2)
-    cv.hline(x + w * 0.4, y + h - 8, 50, (90, 140, 200), 2)
-    for bx, bw, bh in ((0.03, 0.20, 0.42), (0.26, 0.16, 0.34), (0.44, 0.18, 0.38)):
-        cv.rect(x + w * bx, y + h * (0.98 - bh) - 26, w * bw, h * bh + 26,
-                (52, 44, 60))
-        cv.rect(x + w * (bx + bw * 0.6), y + h * (0.98 - bh) - 40, 6, 18,
-                (52, 44, 60))
-        cv.circle(x + w * (bx + bw * 0.6) + 3, y + h * (0.98 - bh) - 46, 6,
-                  (150, 140, 150))
-    cv.thick_line(x + w * 0.72, y + h * 0.30, x + w * 0.72, y + h * 0.78, 5,
-                  (200, 200, 205))                                 # radar pole
-    cv.ellipse(x + w * 0.72, y + h * 0.30, 34, 20, (225, 225, 230))  # dish
-    cv.ellipse(x + w * 0.72, y + h * 0.30, 26, 14, (180, 185, 195))
-    cv.disc(x + w * 0.72, y + h * 0.30, 5, (120, 125, 135))
-    for r in (48, 62, 76):
-        _arc_seg(cv, x + w * 0.72, y + h * 0.30, r, 20, 160, 2, (255, 255, 255))
-    cv.rect(x + w * 0.62, y + h * 0.78, w * 0.20, 8, (90, 95, 105))
-    cv.frame(x + w - 92, y + 8, 84, 24, RED, 2)                     # DENIED stamp
-    draw_text(cv, x + w - 50, y + 12, "DENIED", 14, RED, align="center")
+def scene_manama(cv, x, y, w, h):
+    sky(cv, x, y, w, h, hx("#e8783c"), hx("#b04a72"), hx("#5a3a6e"))
+    cv.disc(x + w - 40, y + 22, 11, hx("#ffd9a0"))
+    # radar dish
+    cx, cy = x + w * 0.34, y + 58
+    cv.line(cx, cy, cx - 8, y + h - 22, 3, INK)
+    cv.line(cx, cy, cx + 8, y + h - 22, 3, INK)
+    cv.ellipse(cx, cy, 34, 12, hx("#d8d8e0"))
+    cv.ellipse(cx, cy, 34, 12, hx("#d8d8e0"))
+    cv.line(cx - 34, cy, cx + 34, cy, 1.5, hx("#8a8a96"))
+    for r in (42, 52):
+        arc_strip(cv, cx, cy, r, 2, -160, -20, hx("#ffe9a8"), 24)
+    # industrial buildings + chimneys
+    for i, (bx, bw, bh) in enumerate([(x + w * 0.58, 46, 44), (x + w * 0.76, 40, 56),
+                                      (x + w * 0.9, 34, 36)]):
+        cv.rect(bx, y + h - 22 - bh, bx + bw, y + h - 22, hx("#3a2a3c"))
+        cv.rect(bx + bw * 0.6, y + h - 22 - bh - 16, bx + bw * 0.75, y + h - 22 - bh, hx("#3a2a3c"))
+        smoke(cv, bx + bw * 0.68, y + h - 22 - bh - 22, 1.6, hx("#c8c8d8"))
+    # sea
+    cv.rect(x, y + h - 22, x + w, y + h, hx("#2a4a6e"))
+    cv.hline(x + 12, x + w - 12, y + h - 12, 1.5, hx("#7aa8d8"))
+    # DENIED cross
+    dx, dy = x + w * 0.68, y + 30
+    cv.line(dx - 10, dy - 10, dx + 10, dy + 10, 4, RED)
+    cv.line(dx + 10, dy - 10, dx - 10, dy + 10, 4, RED)
 
 
-def thumb_icj(cv, x, y, w, h):
-    cv.vgrad(x, y, w, h, (196, 214, 232), (226, 230, 236))
-    cv.rect(x + w * 0.18, y + h * 0.42, w * 0.64, h * 0.50, (248, 246, 240))
-    cv.poly([(x + w * 0.12, y + h * 0.44), (x + w * 0.50, y + h * 0.16),
-             (x + w * 0.88, y + h * 0.44)], (226, 220, 204))
+def scene_icj(cv, x, y, w, h):
+    sky(cv, x, y, w, h, hx("#cfe0ee"), hx("#f2e7c9"))
+    cv.rect(x + w * 0.18, y + 18, x + w * 0.82, y + h - 14, hx("#e8e0c8"))
+    cv.poly([(x + w * 0.14, y + 20), (x + w * 0.5, y + 6), (x + w * 0.86, y + 20)], hx("#c8b888"))
     for i in range(5):
-        cx = x + w * (0.24 + i * 0.13)
-        cv.rect(cx, y + h * 0.46, 7, h * 0.42, (210, 204, 188))
-    cv.rect(x + w * 0.14, y + h * 0.90, w * 0.72, 4, (180, 172, 156))
-    cv.disc(x + w * 0.08, y + h * 0.20, 5, (250, 220, 90))
-    cv.disc(x + w * 0.92, y + h * 0.24, 4, (250, 220, 90))
+        cx = x + w * (0.22 + i * 0.14)
+        cv.rect(cx, y + 24, cx + 7, y + h - 18, hx("#f7f3e8"))
+    cv.rect(x + w * 0.16, y + h - 16, x + w * 0.84, y + h - 12, hx("#c8b888"))
+    flag(cv, x + w * 0.06, y + 12, 14, 8, hx("#1a2b4a"), PAPER)
+    flag(cv, x + w * 0.88, y + 12, 14, 8, hx("#2a6b3c"), PAPER)
+    person(cv, x + w * 0.5, y + h - 8, 2.6, NAVY)
 
 
-def thumb_hk(cv, x, y, w, h):
-    cv.vgrad(x, y, w, h, (240, 236, 222), (214, 206, 188))
-    cv.rect(x + w * 0.06, y + h * 0.42, w * 0.34, h * 0.48, (176, 32, 32))
-    cv.rect(x + w * 0.06, y + h * 0.42, w * 0.34, 6, (140, 24, 24))
-    cv.rect(x + w * 0.18, y + h * 0.30, 4, 14, WHITE)
-    cv.rect(x + w * 0.16, y + h * 0.22, 8, 10, WHITE)
-    draw_text(cv, x + w * 0.23, y + h * 0.58, "VOTE", 11, WHITE, align="center")
-    cx, cy, r = x + w * 0.72, y + h * 0.42, 24
-    _arc_seg(cv, cx, cy, r, 90, 90 + 355, 9, (176, 32, 32))
-    _arc_seg(cv, cx, cy, r, 90 + 355, 450, 9, (190, 182, 166))
-    cv.disc(cx, cy, 12, (240, 236, 222))
-    draw_text(cv, cx, y + h * 0.80, "98.79%", 11, RED, align="center")
+def scene_hk(cv, x, y, w, h):
+    sky(cv, x, y, w, h, hx("#d8e8f2"), hx("#f2e7c9"))
+    # ballot box
+    cv.rect(x + 14, y + h - 42, x + 62, y + h - 8, hx("#a32c22"))
+    cv.rect(x + 10, y + h - 48, x + 66, y + h - 42, hx("#7a1e16"))
+    cv.rect(x + 30, y + h - 56, x + 46, y + h - 46, PAPER)
+    cv.line(x + 38, y + h - 56, x + 38, y + h - 46, 1, INK)
+    # ballot paper flying in
+    cv.poly([(x + 52, y + 14), (x + 66, y + 10), (x + 62, y + 30), (x + 48, y + 32)], PAPER)
+    cv.line(x + 54, y + 18, x + 62, y + 16, 1, INK)
+    # donut 98.79%
+    donut(cv, x + w - 52, y + h // 2 + 2, 26, 98.79, hx("#2a6b3c"), hx("#d8d8d8"))
+    draw_text(cv, "98.79%", x + w - 52, y + h // 2 - 3, 9, INK, align="center")
+    # voters queue dots
+    for i, c in enumerate([NAVY, RED, hx("#2a6b3c")]):
+        person(cv, x + 84 + i * 16, y + h - 10, 2.4, c)
 
 
-def thumb_cricket(cv, x, y, w, h):
-    cv.vgrad(x, y, w, h, (150, 200, 240), (120, 180, 220))
-    cv.rect(x, y + h * 0.45, w, h * 0.55, (70, 160, 70))
-    cv.ellipse(x + w * 0.50, y + h * 0.72, w * 0.42, h * 0.20, (110, 190, 90))
-    cv.rect(x + w * 0.42, y + h * 0.52, w * 0.16, h * 0.38, (222, 198, 150))
-    cv.rect(x + w * 0.30, y + h * 0.30, 5, h * 0.30, (120, 90, 50))  # stumps
-    cv.rect(x + w * 0.36, y + h * 0.30, 5, h * 0.30, (120, 90, 50))
-    cv.rect(x + w * 0.42, y + h * 0.30, 5, h * 0.30, (120, 90, 50))
-    cv.circle(x + w * 0.62, y + h * 0.42, 7, (240, 200, 160))       # batsman
-    cv.thick_line(x + w * 0.62, y + h * 0.48, x + w * 0.60, y + h * 0.72, 5,
-                  (30, 60, 140))
-    cv.thick_line(x + w * 0.60, y + h * 0.52, x + w * 0.72, y + h * 0.66, 4,
-                  (200, 170, 110))
-    cv.disc(x + w * 0.80, y + h * 0.80, 4, (200, 40, 40))            # ball
-    cv.rect(x + w * 0.68, y + h * 0.06, w * 0.28, 16, INK)
-    draw_text(cv, x + w * 0.82, y + h * 0.06 + 2, "720/9", 12, WHITE, align="center")
+def scene_cricket(cv, x, y, w, h):
+    sky(cv, x, y, w, h, hx("#bfe0f2"), hx("#e8f2d8"))
+    cv.rect(x, y + h - 34, x + w, y + h, hx("#3a8a3c"))
+    cv.rect(x + w * 0.32, y + h - 34, x + w * 0.68, y + h, hx("#d8c89a"))
+    # stumps
+    for sx in (x + w * 0.42, x + w * 0.45, x + w * 0.48):
+        cv.rect(sx, y + h - 30, sx + 1.6, y + h - 18, hx("#f2d23c"))
+    # bat + ball
+    cv.line(x + w * 0.62, y + h - 40, x + w * 0.72, y + h - 14, 4, hx("#c89a5a"))
+    cv.disc(x + w * 0.78, y + h - 44, 4, RED)
+    # scoreboard
+    cv.rect(x + 8, y + 8, x + 78, y + 26, NAVY)
+    draw_text(cv, "720/9", x + 43, y + 10, 13, PAPER, align="center")
+    cloud(cv, x + w * 0.8, y + 12, 2.2, PAPER)
+    person(cv, x + w * 0.2, y + h - 8, 2.6, PAPER)
 
 
-def thumb_f1(cv, x, y, w, h):
-    cv.vgrad(x, y, w, h, (30, 20, 60), (90, 60, 120))
-    for i in range(6):
-        cv.disc(x + w * (0.1 + i * 0.16), y + h * 0.10, 2, (255, 220, 120))
-    cv.rect(x, y + h * 0.55, w, h * 0.45, (60, 60, 68))
-    cv.rect(x, y + h * 0.55, w, 3, WHITE)
-    cv.rect(x, y + h * 0.82, w, 3, (255, 220, 60))
-    cv.rect(x + w * 0.18, y + h * 0.62, w * 0.42, 14, (20, 60, 180))  # car
-    cv.poly([(x + w * 0.30, y + h * 0.62), (x + w * 0.38, y + h * 0.52),
-             (x + w * 0.50, y + h * 0.52), (x + w * 0.54, y + h * 0.62)],
-            (20, 60, 180))
-    cv.disc(x + w * 0.26, y + h * 0.76, 7, INK)
-    cv.disc(x + w * 0.52, y + h * 0.76, 7, INK)
-    cv.disc(x + w * 0.26, y + h * 0.76, 3, (200, 200, 200))
-    cv.disc(x + w * 0.52, y + h * 0.76, 3, (200, 200, 200))
-    for i in range(3):                                                # flag
-        for j in range(2):
-            cv.rect(x + w * (0.74 + i * 0.05), y + h * (0.14 + j * 0.08), 9, 7,
-                    INK if (i + j) % 2 == 0 else WHITE)
-    cv.thick_line(x + w * 0.72, y + h * 0.12, x + w * 0.72, y + h * 0.44, 2, INK)
-
-
-def thumb_nba(cv, x, y, w, h):
-    cv.vgrad(x, y, w, h, (240, 230, 210), (220, 200, 170))
-    cv.rect(x, y + h * 0.55, w, h * 0.45, (205, 130, 60))
-    cv.hline(x, y + h * 0.72, w, WHITE, 2)
-    cv.thick_line(x + w * 0.78, y + h * 0.10, x + w * 0.78, y + h * 0.55, 4, INK)
-    cv.rect(x + w * 0.68, y + h * 0.08, 5, h * 0.30, INK)
-    cv.rect(x + w * 0.60, y + h * 0.06, 16, 22, WHITE)
-    cv.frame(x + w * 0.60, y + h * 0.06, 16, 22, RED, 2)
-    cv.ring(x + w * 0.68, y + h * 0.32, 7, 2, RED)
-    cv.circle(x + w * 0.30, y + h * 0.30, 9, (30, 60, 140))           # player
-    cv.thick_line(x + w * 0.30, y + h * 0.38, x + w * 0.28, y + h * 0.62, 6,
-                  (30, 60, 140))
-    cv.circle(x + w * 0.52, y + h * 0.42, 8, (240, 110, 40))          # ball
-    cv.rect(x + w * 0.06, y + h * 0.06, w * 0.34, 16, INK)
-    draw_text(cv, x + w * 0.23, y + h * 0.06 + 2, "50 PTS", 12, WHITE, align="center")
-
-
-def thumb_house(cv, x, y, w, h):
-    cv.vgrad(x, y, w, h, (200, 216, 236), (232, 236, 240))
-    cv.rect(x + w * 0.08, y + h * 0.48, w * 0.34, h * 0.44, (248, 246, 240))
-    cv.ellipse(x + w * 0.25, y + h * 0.48, w * 0.17, h * 0.16, (248, 246, 240))
-    cv.rect(x + w * 0.25, y + h * 0.26, 2, h * 0.10, INK)
-    cv.rect(x + w * 0.25, y + h * 0.26, 12, 7, (30, 60, 140))
+def scene_f1(cv, x, y, w, h):
+    sky(cv, x, y, w, h, hx("#f2d8a8"), hx("#e8b878"))
+    # track
+    cv.poly([(x, y + h - 26), (x + w, y + h - 40), (x + w, y + h - 12), (x, y + h - 6)],
+            hx("#3a3a40"))
+    cv.poly([(x, y + h - 20), (x + w, y + h - 34), (x + w, y + h - 30), (x, y + h - 16)],
+            hx("#f2f2f2"))
+    # race car
+    cx, cy = x + w * 0.42, y + h - 44
+    cv.poly([(cx - 26, cy + 6), (cx - 20, cy - 4), (cx + 8, cy - 6), (cx + 26, cy + 2),
+             (cx + 26, cy + 8), (cx - 26, cy + 8)], RED)
+    cv.disc(cx - 16, cy + 9, 5, INK)
+    cv.disc(cx + 16, cy + 9, 5, INK)
+    cv.rect(cx + 24, cy - 10, cx + 30, cy + 2, INK)
+    # speed lines
+    for i in range(3):
+        cv.hline(x + w * 0.62, x + w * 0.92, y + 14 + i * 8, 2, PAPER)
+    # chequered flag
     for i in range(4):
-        cv.rect(x + w * (0.12 + i * 0.08), y + h * 0.54, 5, h * 0.30, (210, 204, 188))
-    cv.rect(x + w * 0.06, y + h * 0.90, w * 0.38, 4, (180, 172, 156))
-    bx, by = x + w * 0.52, y + h * 0.30
-    cv.rect(bx, by + 34, 26, 26, (30, 90, 180))                       # 258 bar
-    cv.rect(bx + 32, by + 46, 26, 14, (200, 60, 60))                  # 177 bar
-    draw_text(cv, bx + 13, by + 6, "258", 13, (30, 90, 180), align="center")
-    draw_text(cv, bx + 45, by + 20, "177", 11, (200, 60, 60), align="center")
-    draw_text(cv, bx + 26, by + 64, "435 seats", 10, INK, align="center")
+        for j in range(2):
+            cv.rect(x + w - 30 + i * 6, y + 8 + j * 6, x + w - 24 + i * 6, y + 14 + j * 6,
+                    INK if (i + j) % 2 == 0 else PAPER)
+    cv.rect(x + w - 31, y + 8, x + w - 30, y + 34, INK)
 
 
-def thumb_ukeu(cv, x, y, w, h):
-    cv.vgrad(x, y, w, h, (210, 222, 238), (236, 234, 226))
-    for i, (fx, col) in enumerate(((0.10, None), (0.52, None))):
-        px = x + w * fx
-        cv.thick_line(px, y + h * 0.14, px, y + h * 0.72, 3, (90, 80, 70))
-        if i == 0:                                                     # Union Jack
-            cv.rect(px, y + h * 0.14, 52, 30, (20, 50, 140))
-            cv.rect(px, y + h * 0.14 + 12, 52, 6, WHITE)
-            cv.rect(px + 23, y + h * 0.14, 6, 30, WHITE)
-            cv.rect(px, y + h * 0.14 + 13, 52, 4, (200, 40, 40))
-            cv.rect(px + 24, y + h * 0.14, 4, 30, (200, 40, 40))
-        else:                                                          # EU flag
-            cv.rect(px, y + h * 0.14, 52, 30, (20, 50, 140))
-            for sx in range(6):
-                cv.disc(px + 10 + sx * 7, y + h * 0.14 + 15, 2, (255, 220, 60))
-    cv.circle(x + w * 0.38, y + h * 0.78, 8, (232, 190, 150))         # handshake
-    cv.circle(x + w * 0.62, y + h * 0.78, 8, (200, 150, 110))
-    cv.thick_line(x + w * 0.30, y + h * 0.70, x + w * 0.70, y + h * 0.86, 7,
-                  (232, 190, 150))
-    cv.thick_line(x + w * 0.70, y + h * 0.70, x + w * 0.30, y + h * 0.86, 7,
-                  (200, 150, 110))
+def scene_nba(cv, x, y, w, h):
+    sky(cv, x, y, w, h, hx("#f2e0c8"), hx("#d8b888"))
+    cv.rect(x, y + h - 30, x + w, y + h, hx("#c86a2a"))
+    cv.ellipse(x + w * 0.5, y + h - 8, 46, 7, hx("#e8a85a"))
+    # hoop
+    cv.rect(x + w - 34, y + 10, x + w - 8, y + 34, PAPER)
+    cv.rect(x + w - 34, y + 10, x + w - 8, y + 34, INK) if False else None
+    cv.ellipse(x + w - 21, y + 38, 9, 3, hx("#d84a1a"))
+    cv.line(x + w - 28, y + 40, x + w - 26, y + 52, 1, PAPER)
+    cv.line(x + w - 14, y + 40, x + w - 16, y + 52, 1, PAPER)
+    # ball + player
+    cv.disc(x + w * 0.3, y + 22, 7, hx("#e87a2a"))
+    cv.line(x + w * 0.3 - 7, y + 22, x + w * 0.3 + 7, y + 22, 1, INK)
+    person(cv, x + w * 0.55, y + h - 12, 3.4, NAVY)
+    # scoreboard 50
+    cv.rect(x + 8, y + 8, x + 56, y + 26, NAVY)
+    draw_text(cv, "50 PTS", x + 32, y + 10, 12, PAPER, align="center")
 
 
-def thumb_energy(cv, x, y, w, h):
-    cv.vgrad(x, y, w, h, (60, 70, 90), (30, 34, 52))
-    for i, px in enumerate((0.14, 0.50, 0.84)):
-        cv.thick_line(x + w * px, y + h * 0.30, x + w * px, y + h * 0.92, 4, INK)
-        cv.thick_line(x + w * (px - 0.08), y + h * 0.34, x + w * (px + 0.08),
-                      y + h * 0.34, 3, INK)
-    cv.thick_line(x + w * 0.06, y + h * 0.32, x + w * 0.94, y + h * 0.44, 1, GREY)
-    cv.rect(x + w * 0.30, y + h * 0.55, w * 0.40, h * 0.37, (20, 22, 34))
-    _windows(cv, x + w * 0.32, y + h * 0.58, w * 0.36, h * 0.30, 4, 2, False,
-             (250, 210, 90))
-    cv.poly([(x + w * 0.82, y + h * 0.10), (x + w * 0.72, y + h * 0.38),
-             (x + w * 0.79, y + h * 0.38), (x + w * 0.70, y + h * 0.62),
-             (x + w * 0.84, y + h * 0.34), (x + w * 0.77, y + h * 0.34)],
-            (255, 220, 60))
+def scene_dpr(cv, x, y, w, h):
+    sky(cv, x, y, w, h, hx("#d8e2f2"), hx("#f2e7c9"))
+    # capitol dome
+    cv.rect(x + w * 0.3, y + 26, x + w * 0.7, y + h - 12, hx("#f2efe2"))
+    cv.ellipse(x + w * 0.5, y + 26, 26, 14, hx("#f2efe2"))
+    cv.rect(x + w * 0.48, y + 8, x + w * 0.52, y + 16, hx("#c9a227"))
+    for i in range(4):
+        cx = x + w * (0.34 + i * 0.11)
+        cv.rect(cx, y + 34, cx + 4, y + h - 14, hx("#c8b888"))
+    # bar chart 258 / 435
+    bx = x + w * 0.74
+    cv.rect(bx, y + h - 40, bx + 12, y + h - 12, hx("#2a5a9a"))
+    cv.rect(bx + 16, y + h - 30, bx + 28, y + h - 12, hx("#a32c22"))
+    draw_text(cv, "258", bx + 6, y + h - 54, 11, hx("#2a5a9a"), align="center")
+    draw_text(cv, "435", bx + 34, y + h - 54, 9, GREY, align="center")
 
 
-def thumb_hospital(cv, x, y, w, h):
-    cv.vgrad(x, y, w, h, (220, 232, 238), (240, 242, 244))
-    cv.rect(x + w * 0.10, y + h * 0.30, w * 0.50, h * 0.60, (248, 248, 250))
-    cv.rect(x + w * 0.10, y + h * 0.30, w * 0.50, 6, (200, 60, 60))
-    cv.rect(x + w * 0.62, y + h * 0.14, 22, 22, WHITE)                # red cross
-    cv.frame(x + w * 0.62, y + h * 0.14, 22, 22, RED, 2)
-    cv.rect(x + w * 0.62 + 9, y + h * 0.14 + 3, 4, 16, RED)
-    cv.rect(x + w * 0.62 + 3, y + h * 0.14 + 9, 16, 4, RED)
-    _windows(cv, x + w * 0.14, y + h * 0.44, w * 0.42, h * 0.34, 3, 2, False,
-             (140, 190, 220))
-    cv.rect(x + w * 0.66, y + h * 0.62, w * 0.28, h * 0.28, (200, 210, 220))
-    cv.thick_line(x + w * 0.66, y + h * 0.70, x + w * 0.72, y + h * 0.70, 2, RED)
-    cv.thick_line(x + w * 0.72, y + h * 0.70, x + w * 0.76, y + h * 0.62, 2, RED)
-    cv.thick_line(x + w * 0.76, y + h * 0.62, x + w * 0.80, y + h * 0.76, 2, RED)
-    cv.thick_line(x + w * 0.80, y + h * 0.76, x + w * 0.86, y + h * 0.70, 2, RED)
+def scene_ukeu(cv, x, y, w, h):
+    sky(cv, x, y, w, h, hx("#d8e2f2"), hx("#f2e7c9"))
+    # bridge arc
+    arc_strip(cv, x + w * 0.5, y + h - 6, 58, 5, 180, 360, hx("#8a8a92"), 32)
+    cv.rect(x + 8, y + h - 26, x + 14, y + h - 6, hx("#6b6b66"))
+    cv.rect(x + w - 14, y + h - 26, x + w - 8, y + h - 6, hx("#6b6b66"))
+    # UK flag
+    fx, fy = x + 16, y + 12
+    cv.rect(fx, fy, fx + 34, fy + 20, hx("#1a2b6e"))
+    cv.line(fx, fy, fx + 34, fy + 20, 3, PAPER)
+    cv.line(fx + 34, fy, fx, fy + 20, 3, PAPER)
+    cv.line(fx + 15, fy, fx + 19, fy + 20, 3, PAPER)
+    cv.line(fx, fy + 8, fx + 34, fy + 12, 3, PAPER)
+    cv.line(fx, fy, fx + 34, fy + 20, 1.2, RED)
+    cv.line(fx + 34, fy, fx, fy + 20, 1.2, RED)
+    # EU flag
+    ex, ey = x + w - 52, y + 12
+    cv.rect(ex, ey, ex + 34, ey + 20, hx("#1a3a8c"))
+    for i in range(8):
+        a = math.radians(i * 45)
+        cv.disc(ex + 17 + 8 * math.cos(a), ey + 10 + 6.5 * math.sin(a), 1.3, hx("#ffd23c"))
+    # handshake: two hands meeting
+    cv.disc(x + w * 0.5 - 8, y + h - 34, 6, hx("#d8a878"))
+    cv.disc(x + w * 0.5 + 8, y + h - 34, 6, hx("#b88858"))
+    cv.rect(x + w * 0.5 - 14, y + h - 40, x + w * 0.5 + 14, y + h - 28, hx("#d8a878"))
 
 
-def thumb_fire(cv, x, y, w, h):
-    cv.vgrad(x, y, w, h, (240, 200, 140), (200, 110, 60))
-    cv.rect(x + w * 0.10, y + h * 0.50, w * 0.55, h * 0.42, (90, 80, 74))
-    cv.rect(x + w * 0.10, y + h * 0.50, w * 0.55, 6, (120, 110, 100))
-    cv.rect(x + w * 0.58, y + h * 0.30, 8, h * 0.62, (90, 80, 74))     # chimney
-    for sx, sy, sr in ((0.62, 0.22, 10), (0.66, 0.12, 12), (0.58, 0.06, 9)):
-        cv.circle(x + w * sx, y + h * sy, sr, (120, 116, 112))
-    cv.poly([(x + w * 0.16, y + h * 0.92), (x + w * 0.24, y + h * 0.52),
-             (x + w * 0.32, y + h * 0.92)], (255, 90, 20))
-    cv.poly([(x + w * 0.34, y + h * 0.92), (x + w * 0.42, y + h * 0.58),
-             (x + w * 0.50, y + h * 0.92)], (255, 140, 30))
-    cv.poly([(x + w * 0.50, y + h * 0.92), (x + w * 0.56, y + h * 0.66),
-             (x + w * 0.62, y + h * 0.92)], (255, 210, 60))
-    cv.rect(x + w * 0.72, y + h * 0.70, w * 0.24, 14, (200, 40, 40))   # truck
-    cv.disc(x + w * 0.77, y + h * 0.86, 5, INK)
-    cv.disc(x + w * 0.90, y + h * 0.86, 5, INK)
+def scene_iran(cv, x, y, w, h):
+    sky(cv, x, y, w, h, hx("#2a2a44"), hx("#5a3a44"))
+    # dark city, few lit windows
+    for i, (bx, bw, bh) in enumerate([(x + 6, 34, 40), (x + 46, 28, 52), (x + 80, 36, 34),
+                                      (x + 122, 30, 46), (x + 156, 26, 30)]):
+        building(cv, bx, y + h - 6 - bh, bw, bh, hx("#1a1a28"), hx("#ffd97a"), lit=0.25)
+    # lightning bolt
+    cv.poly([(x + w * 0.52, y + 8), (x + w * 0.44, y + 30), (x + w * 0.5, y + 30),
+             (x + w * 0.42, y + 52), (x + w * 0.56, y + 26), (x + w * 0.5, y + 26)],
+            hx("#ffd23c"))
+    # clock "2h"
+    cv.disc(x + w - 26, y + 16, 11, PAPER)
+    cv.ring(x + w - 26, y + 16, 11, 9, INK)
+    draw_text(cv, "2h", x + w - 26, y + 10, 10, INK, align="center")
+    star(cv, x + 16, y + 12, 1.1)
+    star(cv, x + w - 60, y + 8, 1.1)
 
 
-# ---------------------------------------------------------------- content
-LEADS = [
-    dict(num=1, loc="ANTALYA, TURKIYE", tag="CLIMATE", badge="CONFIRMED",
-         head=["COP31 ends with no deal"], hsize=26,
-         body=["EU and 130 nations reject a text with no mention",
-               "of fossil fuels; first COP with no deal since 2000."],
-         src="Reuters · AP · UNFCCC", scene=hero_cop31),
-    dict(num=2, loc="KYIV REGION, UKRAINE", tag="WAR", badge="CONFIRMED",
-         head=["Russia fires 186 drones", "at Ukraine"], hsize=24,
-         body=["186 drones in the night, 161 downed; a block of",
-               "flats hit in Dymer, 2 dead, 14 missing, 9 rescued."],
-         src="Kyiv Post · Reuters", scene=hero_kyiv),
-    dict(num=3, loc="MANAMA, BAHRAIN", tag="IRAN", badge="CLAIM",
-         head=["Iran claims two US radars", "hit; Bahrain denies it"], hsize=24,
-         body=["IRGC says it hit two US Patriot radars; Bahrain",
-               "says a civilian site burned, 2 hurt; US denies."],
-         src="CBS · Reuters · Fars", scene=hero_manama),
+def scene_bolsonaro(cv, x, y, w, h):
+    sky(cv, x, y, w, h, hx("#d8e8f2"), hx("#f2e7c9"))
+    cv.rect(x + 12, y + 16, x + w - 12, y + h - 8, hx("#f2f2f2"))
+    cv.rect(x + 12, y + 16, x + w - 12, y + 22, hx("#c8d8e8"))
+    # red cross
+    cx, cy = x + w * 0.5, y + 36
+    cv.rect(cx - 12, cy - 4, cx + 12, cy + 4, RED)
+    cv.rect(cx - 4, cy - 12, cx + 4, cy + 12, RED)
+    # windows
+    for wy in (y + 48, y + 60):
+        for wx in range(int(x + 22), int(x + w - 22), 16):
+            cv.rect(wx, wy, wx + 8, wy + 6, hx("#9ab8d8"))
+    # bed + patient
+    cv.rect(x + 22, y + h - 16, x + 62, y + h - 10, hx("#8a8a92"))
+    cv.rect(x + 22, y + h - 22, x + 62, y + h - 16, PAPER)
+    cv.disc(x + 28, y + h - 24, 3.5, hx("#d8a878"))
+    person(cv, x + w - 30, y + h - 8, 2.6, hx("#2a6b3c"))
+
+
+def scene_fire(cv, x, y, w, h):
+    sky(cv, x, y, w, h, hx("#3a2a3c"), hx("#8a3a2a"))
+    # factory
+    cv.rect(x + 10, y + 30, x + w - 60, y + h - 8, hx("#5a4a42"))
+    cv.rect(x + 10, y + 30, x + w - 60, y + 36, hx("#3a2e28"))
+    for wx in range(int(x + 18), int(x + w - 68), 14):
+        cv.rect(wx, y + 44, wx + 7, y + 52, hx("#ffd97a"))
+    cv.rect(x + w - 56, y + 18, x + w - 46, y + h - 8, hx("#4a3a32"))
+    smoke(cv, x + w - 51, y + 10, 2.0, hx("#9a9aa2"))
+    # flames
+    for i, (fx, fs) in enumerate([(x + 30, 1.0), (x + 58, 1.3), (x + 88, 1.0), (x + 118, 0.8)]):
+        cv.poly([(fx - 10 * fs, y + h - 8), (fx, y + h - 34 * fs), (fx + 10 * fs, y + h - 8)],
+                hx("#ff7a2a"))
+        cv.poly([(fx - 5 * fs, y + h - 8), (fx, y + h - 22 * fs), (fx + 5 * fs, y + h - 8)],
+                hx("#ffd23c"))
+    # fire truck
+    cv.rect(x + w - 52, y + h - 20, x + w - 8, y + h - 8, RED)
+    cv.disc(x + w - 42, y + h - 6, 3.5, INK)
+    cv.disc(x + w - 16, y + h - 6, 3.5, INK)
+
+
+SCENES = [scene_cop31, scene_kyiv, scene_manama, scene_icj, scene_hk,
+          scene_cricket, scene_f1, scene_nba, scene_dpr, scene_ukeu,
+          scene_iran, scene_bolsonaro, scene_fire]
+
+
+# -------------------------------------------------------------- map ----
+# Rough continent outlines in a 0..100 x 0..50 grid (equirectangular).
+CONTINENTS = [
+    [(4, 8), (10, 4), (20, 3), (28, 6), (30, 10), (26, 14), (22, 18), (18, 22),
+     (14, 20), (10, 16), (6, 12)],
+    [(26, 28), (30, 26), (34, 28), (33, 36), (29, 44), (26, 38), (24, 32)],
+    [(46, 6), (52, 4), (56, 7), (54, 11), (50, 13), (46, 11)],
+    [(46, 20), (54, 18), (58, 22), (56, 30), (52, 36), (48, 32), (45, 26)],
+    [(58, 4), (75, 3), (90, 5), (96, 9), (92, 14), (86, 18), (80, 20), (74, 24),
+     (68, 22), (62, 18), (58, 14), (56, 10)],
+    [(82, 32), (90, 30), (94, 33), (90, 38), (84, 37)],
 ]
+# Pin positions (grid coords) for stories 1..13.
+PINS = {1: (50, 10), 2: (56, 7), 3: (60, 14), 4: (47, 8), 5: (84, 16),
+        6: (91, 36), 7: (12, 15), 8: (16, 14), 9: (18, 12), 10: (48, 7),
+        11: (62, 13), 12: (28, 34), 13: (80, 20)}
 
-SMALL = [
-    dict(num=4, loc="THE HAGUE · WORLD COURT", head=["ICJ: Myanmar committed", "genocide"],
-         body="Rohingya welcome verdict. (Reuters)", scene=thumb_icj),
-    dict(num=5, loc="HONG KONG · ELECTION", head=["Record turnout in", "committee polls"],
-         body="98.79% voted; 856 for 723 (SCMP)", scene=thumb_hk),
-    dict(num=6, loc="WELLINGTON, NZ · CRICKET", head=["India declare on a", "record 720/9"],
-         body="Rahul 136, Pant 128, Gill 98. (ESPN)", scene=thumb_cricket),
-    dict(num=7, loc="LAS VEGAS · FORMULA 1", head=["Verstappen wins the", "Las Vegas GP"],
-         body="Beats Norris under the lights. (F1)", scene=thumb_f1),
-    dict(num=8, loc="SAN ANTONIO · NBA", head=["Wembanyama scores 50", "as Spurs roll on"],
-         body="50 pts, 19 reb, 5 blk; 114-91. (NBA)", scene=thumb_nba),
-    dict(num=9, loc="WASHINGTON · POLITICS", head=["Democrats win biggest", "House majority since 1992"],
-         body="Hubbard beats Foxx; 258 seats. (AP)", scene=thumb_house),
-    dict(num=10, loc="LONDON · EUROPE", head=["UK and EU strike post-", "Brexit deals"],
-         body="Trade and travel pacts agreed. (AP)", scene=thumb_ukeu),
-    dict(num=11, loc="TEHRAN · ENERGY", head=["Iran begins rationing", "electricity"],
-         body="Rolling cuts up to 2 hours. (Wires)", scene=thumb_energy),
-    dict(num=12, loc="BRASILIA · HEALTH", head=["Bolsonaro in intensive", "care"],
-         body="Bowel blockage, 71, stable. (Wires)", scene=thumb_hospital),
-    dict(num=13, loc="CIKANDE, INDONESIA · FIRE", head=["Candy-factory fire in", "Cikande: 3 dead"],
-         body="36 missing as search goes on. (Detik)", scene=thumb_fire),
-]
 
-ALSO = [
-    (14, "Benghazi: Sea drones hit Russian warship at Benghazi. (Wires)"),
-    (15, "Washington: FBI probes hack of its crime database. (AP)"),
-    (16, "Gaza City: Israeli fire kills four in Gaza. (Gaza civil defence)"),
-    (17, "Turin: Alcaraz wins first ATP Finals, beats Zverev. (ATP)"),
-    (18, "Gulf of Finland: Sparta II towed home after drone strike. (Wires)"),
-    (19, "Europe: Estonia to shut five Russia border crossings 1 Dec. (Reuters)"),
-    (20, "Europe: Denmark expels a Russian attache over alleged plot. (Guardian)"),
-    (21, "South Asia: Nepal PM Shah lands in Delhi; meets Modi Monday. (IANS)"),
-    (22, "East Asia: Chinese bomber turns back 170 km from Manila. (AP)"),
-    (23, "SE Asia: Philippines M5.9 quake, 898 km deep, off Palawan. (EMSC)"),
-    (24, "East Asia: Japan poll: record 52% feel friendly to South Korea. (Ipsos)"),
-    (25, "South Asia: India and China hold fresh military talks. (Wires)"),
-    (26, "Africa: Somalia expels UAE ambassador, recalls its envoy. (Wires)"),
-    (27, "Africa: Sudan: RSF accused of killing civilians in W. Kordofan. (Claim)"),
-    (28, "Africa: Kenya discharges its last Ebola patient. (Wires)"),
-    (29, "Africa: Drone strikes damage UN facility in Khartoum; 4 killed. (Wires)"),
-    (30, "Oceania: Marles rejects US report on AUKUS subs. (ABC)"),
-    (31, "Oceania: Melbourne, 70 years since the 1956 Olympics opened. (ABC)"),
-    (32, "N. America: Trump seeks 'permanent' Israel deal; Doha talks. (Al Jazeera)"),
-    (33, "SE Asia: EU and Indonesia sign trade deal after ten years. (DW)"),
-    (34, "Africa: Sudan army retakes ~30 towns in Kordofan. (FT)"),
-    (35, "South Asia: Bangladesh: 30 Awami League homes set on fire. (Local)"),
-    (36, "Middle East: Lebanon: Aoun demands Israel withdrawal. (Al Jazeera)"),
-    (37, "World: Scientists sequence whale genome from breath by drone. (Wires)"),
-    (38, "Middle East: Saudi Arabia and Yemen's Houthis exchange fire. (Wires)"),
-]
-
-REGIONS = [("EUROPE", 5, (60, 90, 150)), ("MIDDLE EAST", 5, (150, 60, 60)),
-           ("NORTH AMERICA", 5, (40, 110, 110)), ("SOUTH AMERICA", 1, (110, 140, 50)),
-           ("EAST ASIA", 3, (180, 80, 40)), ("SOUTH ASIA", 4, (150, 110, 30)),
-           ("SOUTHEAST ASIA", 3, (60, 130, 80)), ("AFRICA", 6, (170, 120, 60)),
-           ("OCEANIA", 2, (70, 110, 170)), ("WORLD", 4, (100, 100, 100))]
-
-NUMBERS = [("186", "DRONES FIRED"), ("161", "DRONES DOWNED"),
-           ("258", "HOUSE SEATS · DEM"), ("$120bn", "ADAPTATION TARGET"),
-           ("720/9", "INDIA TEST TOTAL"), ("98.79%", "HK TURNOUT")]
-
-DATE_CHECK = [
-    "400-drone barrage (19-20 Nov)", "148-drone night, Kryvyi Rih (20-21 Nov)",
-    "'El Chapo Isidro' captured (21 Nov)", "Bayelsa boat capsizes, 24 dead (21 Nov)",
-    "Gaza aid-van strike (21 Nov)", "Nvidia SEC probe first reported (20 Nov)",
-    "Saudi strikes on Hodeidah (20-21 Nov)", "Peru earthquake (20 Nov)",
-    "Copa Sudamericana final (21 Nov)", "BepiColombo enters Mercury orbit (21 Nov)",
-    "Russian missiles entered Poland (20 Nov)", "Rugby: England beat NZ 37-12 (21 Nov)",
-    "Football: Arsenal 2-2 Newcastle (21 Nov)",
-]
-
-# pin positions (fraction of map inner box) for stories 1-13
-PINS = {1: (0.56, 0.30), 2: (0.565, 0.20), 3: (0.615, 0.40), 4: (0.505, 0.18),
-        5: (0.81, 0.40), 6: (0.93, 0.78), 7: (0.13, 0.32), 8: (0.17, 0.42),
-        9: (0.23, 0.30), 10: (0.485, 0.15), 11: (0.635, 0.34),
-        12: (0.30, 0.62), 13: (0.775, 0.56)}
-PIN_OFF = {1: (10, -12), 2: (12, -14), 3: (12, 8), 4: (-16, -12), 5: (10, -12),
-           6: (10, 6), 7: (-16, -8), 8: (-16, 10), 9: (10, -14), 10: (-16, 8),
-           11: (14, -10), 12: (10, 10), 13: (10, -12)}
+LABEL_OFF = {1: (-42, 22), 2: (-14, 26), 3: (16, 26), 4: (-58, 10),
+             10: (38, 22), 11: (58, 8), 7: (-26, 18), 8: (2, 22), 9: (28, 16)}
 
 
 def draw_map(cv, x, y, w, h):
-    cv.rect(x, y, w, h, (228, 232, 226))
-    cv.frame(x, y, w, h, RULE, 1)
-    draw_text(cv, x + 8, y + 3, "WHERE IT HAPPENED", 10, INK)
-    mx, my, mw, mh = x + 6, y + 14, w - 12, h - 18
-    land = (196, 188, 164)
-    conts = [
-        [(0.02, 0.28), (0.09, 0.12), (0.19, 0.08), (0.26, 0.16), (0.22, 0.30),
-         (0.17, 0.42), (0.10, 0.40), (0.03, 0.32)],
-        [(0.28, 0.06), (0.31, 0.04), (0.32, 0.09), (0.29, 0.11)],
-        [(0.24, 0.50), (0.30, 0.45), (0.34, 0.54), (0.32, 0.68), (0.28, 0.82),
-         (0.25, 0.68), (0.23, 0.56)],
-        [(0.47, 0.12), (0.53, 0.07), (0.58, 0.12), (0.56, 0.20), (0.51, 0.22),
-         (0.47, 0.17)],
-        [(0.48, 0.34), (0.56, 0.31), (0.60, 0.38), (0.58, 0.50), (0.54, 0.62),
-         (0.50, 0.52), (0.47, 0.42)],
-        [(0.58, 0.08), (0.72, 0.04), (0.86, 0.08), (0.92, 0.18), (0.88, 0.28),
-         (0.80, 0.32), (0.70, 0.30), (0.62, 0.22), (0.58, 0.14)],
-        [(0.82, 0.64), (0.90, 0.61), (0.94, 0.68), (0.90, 0.75), (0.84, 0.72)],
-    ]
-    for pts in conts:
-        # vertical stretch so the schematic map reads less flat
-        cv.poly([(mx + px * mw,
-                  my + (0.5 + (py - 0.5) * 1.35) * mh) for px, py in pts], land)
-    for ix, iy in ((0.775, 0.44), (0.805, 0.48), (0.83, 0.44)):
-        cv.ellipse(mx + ix * mw, my + (0.5 + (iy - 0.5) * 1.35) * mh, 4, 3, land)
-    for n, (fx, fy) in PINS.items():
-        fy2 = 0.5 + (fy - 0.5) * 1.35
-        px, py = mx + fx * mw, my + fy2 * mh
-        ox, oy = PIN_OFF.get(n, (0, 0))
-        cv.disc(px, py, 4, RED)
-        cv.ring(px, py, 4, 1, WHITE)
-        lx, ly = px + ox, py + oy
-        cv.thick_line(px, py, lx, ly, 1, RED)
-        draw_text(cv, lx - (6 if ox < 0 else 0), ly - 5, str(n), 9, RED)
+    cv.rect(x, y, x + w, y + h, hx("#e8f0e8"))
+    sx = w / 100.0
+    sy = h / 50.0
+    for poly in CONTINENTS:
+        cv.poly([(x + px * sx, y + py * sy) for px, py in poly], hx("#b8c8a8"))
+    for num, (gx, gy) in PINS.items():
+        px = x + gx * sx
+        py = y + gy * sy
+        if num in LABEL_OFF:
+            dx, dy = LABEL_OFF[num]
+            lx, ly = px + dx, py + dy
+            cv.line(px, py, lx, ly, 1, GREY)
+            cv.disc(px, py, 2.5, RED)
+            px, py = lx, ly
+        cv.disc(px, py, 6, RED)
+        draw_text(cv, str(num), px, py - 4.5, 8.5, PAPER, align="center")
+
+# ---------------------------------------------------------------- data ----
+LEADS = [
+    dict(scene=scene_cop31, loc="ANTALYA, TURKIYE", cat="CLIMATE", badge="CONFIRMED",
+         headline="COP31 ends with no deal",
+         body="EU + 130 nations reject a text with no fossil-fuel mention; no deal.",
+         source="UNFCCC / Reuters"),
+    dict(scene=scene_kyiv, loc="KYIV REGION, UKRAINE", cat="WAR", badge="CONFIRMED",
+         headline="Russia fires 186 drones at Ukraine",
+         body="186 drones overnight; 161 downed. Dymer block hit: 2 dead, 14 missing.",
+         source="Kyiv Post"),
+    dict(scene=scene_manama, loc="MANAMA, BAHRAIN", cat="IRAN", badge="CLAIM",
+         headline="Iran claims two US radars hit",
+         body="IRGC claims two US radars hit; Bahrain says a civilian site burned.",
+         source="CBS / Fars"),
+]
+
+SMALL = [
+    dict(num=4, scene=scene_icj, loc="THE HAGUE", cat="WORLD COURT",
+         headline="ICJ: Myanmar committed genocide",
+         body="UN court rules Myanmar committed genocide.",
+         source="Reuters / AP"),
+    dict(num=5, scene=scene_hk, loc="HONG KONG", cat="ELECTION",
+         headline="Record turnout in committee polls",
+         body="98.79% turnout; 856 candidates, 723 seats.",
+         source="SCMP"),
+    dict(num=6, scene=scene_cricket, loc="WELLINGTON, NZ", cat="CRICKET",
+         headline="India declare on a record 720/9",
+         body="Rahul 136, Pant 128, Gill 98; NZ 368.",
+         source="ESPNcricinfo"),
+    dict(num=7, scene=scene_f1, loc="LAS VEGAS", cat="FORMULA 1",
+         headline="Verstappen wins the Las Vegas GP",
+         body="Verstappen beats Norris in Las Vegas.",
+         source="F1 / AP"),
+    dict(num=8, scene=scene_nba, loc="SAN ANTONIO, USA", cat="NBA",
+         headline="Wembanyama scores 50 as Spurs roll on",
+         body="50 pts, 19 rebounds, 5 blocks; 114-91.",
+         source="NBA / AP"),
+    dict(num=9, scene=scene_dpr, loc="WASHINGTON, USA", cat="POLITICS",
+         headline="Democrats win biggest House majority",
+         body="Biggest since 1992: at least 258 seats.",
+         source="AP"),
+    dict(num=10, scene=scene_ukeu, loc="LONDON", cat="EUROPE",
+         headline="UK and EU strike post-Brexit deals",
+         body="UK and EU agree post-Brexit trade deals.",
+         source="AP / Reuters"),
+    dict(num=11, scene=scene_iran, loc="TEHRAN, IRAN", cat="ENERGY",
+         headline="Iran begins rationing electricity",
+         body="Iran rations electricity, up to 2 hours a day.",
+         source="Wires"),
+    dict(num=12, scene=scene_bolsonaro, loc="BRASILIA, BRAZIL", cat="HEALTH",
+         headline="Bolsonaro in intensive care",
+         body="Bolsonaro in intensive care; stable.",
+         source="Reuters"),
+    dict(num=13, scene=scene_fire, loc="CIKANDE, INDONESIA", cat="FIRE",
+         headline="Candy-factory fire in Cikande",
+         body="3 dead and 36 missing in a Bantam factory fire.",
+         source="Detiknews"),
+]
+
+ALSO = [
+    (14, "Benghazi: Sea drones hit Russian warship (Wires)"),
+    (15, "FBI probes apparent hack of its crime database (AP)"),
+    (16, "Israeli fire kills four in Gaza (Gaza civil defence)"),
+    (17, "Alcaraz wins first ATP Finals (ATP)"),
+    (18, "Sparta II towed home after drone strike (Wires)"),
+    (19, "Estonia shuts five Russia crossings 1 Dec (Reuters)"),
+    (20, "Denmark expels Russian attache over plot (Guardian)"),
+    (21, "Nepal PM Shah lands in Delhi on first visit (IANS)"),
+    (22, "Chinese bomber turns back 170 km from Manila (AP)"),
+    (23, "Philippines M5.9 quake off Palawan (EMSC)"),
+    (24, "Japan: record 52% feel friendly to S. Korea (Ipsos)"),
+    (25, "India and China hold fresh military talks (Wires)"),
+    (26, "Somalia expels UAE ambassador, recalls envoy (Wires)"),
+    (27, "Sudan: RSF accused of killing civilians (Claim)"),
+    (28, "Kenya discharges its last Ebola patient (Wires)"),
+    (29, "Drone strikes damage UN facility in Khartoum (Wires)"),
+    (30, "Marles rejects US report on AUKUS subs (ABC)"),
+    (31, "Melbourne marks 70 years since 1956 Olympics (ABC)"),
+    (32, "Trump seeks 'permanent' Israel deal (Al Jazeera)"),
+    (33, "EU and Indonesia sign trade deal after ten years (DW)"),
+    (34, "Sudan army retakes ~30 towns in Kordofan (FT)"),
+    (35, "Bangladesh: 30 Awami League homes burned (Local)"),
+    (36, "Lebanon: Aoun demands Israel withdrawal (Al Jazeera)"),
+    (37, "Whale genome sequenced from breath by drone (Wires)"),
+    (38, "Saudi Arabia and Houthis exchange fire (Wires)"),
+]
+
+DATECHECK = [
+    "400-drone barrage (19-20)",
+    "148-drone night (20-21)",
+    "'El Chapo Isidro' held (21)",
+    "Bayelsa boat, 24 dead (21)",
+    "Gaza aid-van strike (21)",
+    "Nvidia SEC probe (20)",
+    "Saudi strikes Hodeidah (20)",
+    "Peru earthquake (20)",
+    "Copa Sudamericana final (21)",
+    "BepiColombo at Mercury (21)",
+    "Missiles entered Poland (20)",
+    "England beat NZ 37-12 (21)",
+    "Arsenal 2-2, Leeds 4-1 (21)",
+]
+
+REGIONS = [
+    ("EUROPE", 5, hx("#1a2b4a")), ("MIDDLE EAST", 5, hx("#a32c22")),
+    ("NORTH AMERICA", 5, hx("#2a5a9a")), ("SOUTH AMERICA", 1, hx("#2a6b3c")),
+    ("EAST ASIA", 3, hx("#b03a6e")), ("SOUTH ASIA", 4, hx("#c86a1a")),
+    ("SOUTHEAST ASIA", 3, hx("#2b7a8c")), ("AFRICA", 6, hx("#6b4a2a")),
+    ("OCEANIA", 2, hx("#5b3a7a")), ("WORLD", 4, hx("#4a4a4a")),
+]
+
+NUMBERS = [
+    ("186", "DRONES FIRED"), ("161", "DOWNED"), ("258", "HOUSE SEATS"),
+    ("$120bn", "ADAPTATION TARGET"), ("720/9", "INDIA'S RECORD TOTAL"),
+    ("98.79%", "HK TURNOUT"),
+]
+
+BADGE_COL = {"CONFIRMED": hx("#2a6b3c"), "CLAIM": hx("#a32c22"),
+             "REPORTED": hx("#6b6b66"), "PENDING": hx("#c9a227")}
+
+MX = 12           # side margin
+CW = W - 2 * MX   # content width = 1000
 
 
-def build():
-    cv = Canvas()
-    # ---- header bar
-    cv.rect(0, 0, W, 20, NAVY)
-    draw_text(cv, 14, 4, "THE WORLD IN ONE DAY", 12, WHITE)
-    draw_text(cv, 1010, 4, "38 STORIES · 10 REGIONS · EVERY ONE DATED SUNDAY 22 NOVEMBER 2026",
-              11, WHITE, align="right")
-    # ---- titles
-    draw_text(cv, 512, 21, "Sunday 22 November 2026", 56, INK, align="center")
-    draw_text(cv, 512, 94, "No Deal in Antalya, 186 Drones Over Kyiv, and Hong Kong's 98.79% Vote",
-              28, INK, align="center")
-    draw_text(cv, 512, 136,
-              "COP31 ends with no deal · 186 drones over Ukraine in the night · Iran's radar claim meets Bahrain's denial",
-              13, RED, italic=True, align="center")
-    # ---- numbers strip
-    y = 151
-    bw, gap = 160, 7
+def fit_text(s, cap, max_w, min_cap=None, tracking=0.0):
+    """Largest cap (<= cap) + tracking that fits max_w; returns (cap, tracking)."""
+    c = cap
+    while c > (min_cap or cap * 0.6) and text_width(s, c, tracking) > max_w:
+        c -= 0.5
+    tr = tracking
+    while text_width(s, c, tr) > max_w and tr > -2.5:
+        tr -= 0.25
+    return c, tr
+
+
+def draw_page(cv):
+    y = 0
+    # ---- header bar ----
+    cv.rect(0, y, W, y + 22, NAVY)
+    draw_text(cv, "THE WORLD IN ONE DAY", MX + 4, y + 5, 12, PAPER, tracking=0.5)
+    draw_text(cv, "38 STORIES · 10 REGIONS · SUNDAY 22 NOVEMBER 2026",
+              W - MX - 4, y + 5, 12, PAPER, align="right", tracking=0.5)
+    y += 22
+    # ---- title line 1 ----
+    t1 = "Sunday 22 November 2026"
+    c1, tr1 = fit_text(t1, 58, CW)
+    draw_text(cv, t1, W / 2, y + 1, c1, INK, align="center", tracking=tr1)
+    y += 76
+    # ---- title line 2 (one line, as large as fits) ----
+    t2 = "No Deal in Antalya, 186 Drones Over Kyiv, and Hong Kong's 98.79% Vote"
+    c2, tr2 = fit_text(t2, 28, CW, min_cap=16)
+    draw_text(cv, t2, W / 2, y + 1, c2, INK, align="center", tracking=tr2)
+    y += int(c2) + 12
+    # ---- subhead (italic red, one line) ----
+    sh = "COP31 ends with no deal · 186 drones over Ukraine in the night · Iran's radar claim meets Bahrain's denial"
+    c3, tr3 = fit_text(sh, 15, CW, min_cap=11)
+    draw_text(cv, sh, W / 2, y + 1, c3, RED, align="center", tracking=tr3, italic=True)
+    y += int(c3) + 5
+    # ---- numbers strip ----
+    bw = CW / 6.0
     for i, (val, lab) in enumerate(NUMBERS):
-        bx = 18 + i * (bw + gap)
-        cv.rect(bx, y, bw, 44, CREAM)
-        cv.frame(bx, y, bw, 44, RULE, 1)
-        cv.rect(bx, y, bw, 3, RED)
-        draw_text(cv, bx + bw / 2, y + 2, val, 30, RED, align="center")
-        draw_text(cv, bx + bw / 2, y + 35, lab, 8, GREY, align="center")
-    # ---- region tabs
-    y = 197
-    tw = 96
-    for i, (name, cnt, col) in enumerate(REGIONS):
-        tx = 18 + i * (tw + 2)
-        cv.rect(tx, y, tw, 15, col)
-        draw_text(cv, tx + tw / 2, y + 3, "%s %d" % (name, cnt), 9, WHITE, align="center")
-    # ---- timeline
-    y = 214
-    tl = "THE DAY IN UTC  01:00 HK polls open · 03:00 COP31 objections close · 05:11 Hamas seeks talks · 05:30 Las Vegas GP ends · 06:00 COP31 approval due · 07:30 Approval slips again · 09:45 "
-    draw_text(cv, 18, y, tl, 10, GREY)
-    px = 18 + text_width(tl, 10)
-    draw_text(cv, px, y, "PRESS TIME", 10, RED)
-    cv.hline(18, y + 14, 988, RULE, 1)
-    # ---- leads
-    y = 230
-    colw, colgap = 324, 8
-    for i, L in enumerate(LEADS):
-        lx = 18 + i * (colw + colgap)
-        L["scene"](cv, lx, y, colw, 153)
-        my = y + 156
-        draw_text(cv, lx, my, "%d · %s — %s" % (L["num"], L["loc"], L["tag"]), 11, INK)
-        bc = (40, 120, 60) if L["badge"] == "CONFIRMED" else (200, 120, 20)
-        cv.rect(lx + colw - 66, my - 1, 66, 13, bc)
-        draw_text(cv, lx + colw - 33, my + 1, L["badge"], 8, WHITE, align="center")
-        hy = my + 15
-        for j, hl in enumerate(L["head"]):
-            draw_text(cv, lx, hy + j * 23, hl, L["hsize"], INK)
-        by = hy + 46
-        for j, bl in enumerate(L["body"]):
-            draw_text(cv, lx, by + j * 14, bl, 12, INK)
-        draw_text(cv, lx, by + 28, L["src"], 10, GREY)
-    # ---- small stories
-    y = 491
-    sw, sgap = 194, 7
+        bx = MX + i * bw
+        cv.rect(bx + 2, y, bx + bw - 2, y + 45, hx("#fdfbf2"))
+        cv.hline(bx + 2, bx + bw - 2, y, 1, RED)
+        vc, vtr = fit_text(val, 36, bw - 12, min_cap=30)
+        draw_text(cv, val, bx + bw / 2, y + 2, vc, RED, align="center", tracking=vtr)
+        draw_text(cv, lab, bx + bw / 2, y + 37, 9, GREY, align="center", tracking=0.3)
+    y += 45
+    y += 2
+    # ---- region tabs ----
+    tw = CW / 10.0
+    for i, (name, n, col) in enumerate(REGIONS):
+        tx = MX + i * tw
+        cv.rect(tx + 1, y, tx + tw - 1, y + 18, col)
+        draw_text(cv, "%s %d" % (name, n), tx + tw / 2, y + 5, 8, PAPER,
+                  align="center", tracking=0)
+    y += 18
+    y += 2
+    # ---- timeline ----
+    cv.rect(MX, y, MX + 108, y + 12, NAVY)
+    draw_text(cv, "THE DAY IN UTC", MX + 54, y + 2, 9, PAPER, align="center", tracking=0.3)
+    tl = ("01:00 HK polls open · 03:00 COP31 objections close · 05:11 Hamas seeks talks · "
+          "05:30 Las Vegas GP ends · 06:00 Approval due · 07:30 Slips again")
+    tl_cap, tl_tr = fit_text(tl, 9, W - MX - 122 - MX - 114, min_cap=7.5)
+    if text_width(tl, tl_cap, tl_tr) > W - MX - 122 - MX - 114:
+        tl = ("01:00 HK polls open · 03:00 COP31 objections close · "
+              "05:30 Las Vegas GP ends · 06:00 Approval due · 07:30 Slips again")
+        tl_cap, tl_tr = fit_text(tl, 9, W - MX - 122 - MX - 114, min_cap=7.5)
+    draw_text(cv, tl, MX + 114, y + 2, tl_cap, INK, tracking=tl_tr)
+    draw_text(cv, "PRESS TIME 09:45 UTC", W - MX, y + 2, 9, RED, align="right", tracking=0.3)
+    y += 12
+    y += 3
+    # ---- 3 leads ----
+    colw = (CW - 2 * 14) / 3.0
+    hero_h = 120
+    lead_top = y
+    for i, ld in enumerate(LEADS):
+        lx = MX + i * (colw + 14)
+        ld["scene"](cv, lx + 8, y, colw - 16, hero_h)
+        yy = y + hero_h + 3
+        draw_text(cv, "%s · %s" % (ld["loc"], ld["cat"]), lx, yy, 11, RED, tracking=0.2)
+        bw_txt = " %s " % ld["badge"]
+        bwid = text_width(bw_txt, 9, 0.4) + 8
+        cv.rect(lx + colw - bwid, yy - 1, lx + colw, yy + 11, BADGE_COL[ld["badge"]])
+        draw_text(cv, ld["badge"], lx + colw - bwid / 2, yy + 1, 9, PAPER,
+                  align="center", tracking=0.4)
+        yy += 13
+        yy = draw_para(cv, ld["headline"], lx, yy, 24, INK, colw, 25, max_lines=2)
+        yy = draw_para(cv, ld["body"], lx, yy + 1, 12.5, INK, colw, 13, max_lines=2)
+        draw_text(cv, ld["source"], lx, yy + 1, 10, GREY)
+        ld["_bottom"] = yy + 10
+    y = max(ld["_bottom"] for ld in LEADS)
+    y += 2
+    # ---- 10 small stories, 5 x 2 ----
+    scolw = (CW - 4 * 10) / 5.0
+    thumb_h = 70
+    row_tops = []
     for row in range(2):
+        row_tops.append(y)
         for col in range(5):
-            s = SMALL[row * 5 + col]
-            sx = 13 + col * (sw + sgap)
-            sy = y + row * 144
-            s["scene"](cv, sx, sy, sw, 85)
-            ly = sy + 87
-            draw_text(cv, sx, ly, "%d " % s["num"], 10, RED)
-            draw_text(cv, sx + text_width("%d " % s["num"], 10), ly, s["loc"], 9, GREY)
-            hy = ly + 11
-            for j, hl in enumerate(s["head"]):
-                draw_text(cv, sx, hy + j * 16, hl, 13, INK)
-            draw_text(cv, sx, hy + 33, s["body"], 10, INK)
-    # ---- ALSO list
-    y = 781
-    draw_text(cv, 18, y, "ALSO ON SUNDAY 22 NOVEMBER — 25 MORE STORIES", 12, INK)
-    cv.hline(18, y + 15, 988, RULE, 1)
-    ay = y + 17
-    for k, (n, txt) in enumerate(ALSO):
-        col = k // 13
-        r = k % 13
-        ax = 18 + col * 500
-        ry = ay + r * 9.8
-        draw_text(cv, ax, ry, "%d. " % n, 9.5, RED)
-        draw_text(cv, ax + text_width("%d. " % n, 9.5), ry, txt, 9.5, INK)
-    # ---- map + date check
-    y = 930
-    draw_map(cv, 18, y, 600, 70)
-    dx = 626
-    cv.rect(dx, y, 380, 70, (252, 246, 238))
-    cv.frame(dx, y, 380, 70, RED, 2)
-    draw_text(cv, dx + 8, y + 3, "DATE CHECK — NOT 22 NOVEMBER", 10, RED)
-    for k, item in enumerate(DATE_CHECK):
-        col = k // 7
-        r = k % 7
-        ix = dx + 10 + col * 190
-        iy = y + 12 + r * 8.0
-        draw_text(cv, ix, iy, "· " + item, 8, INK)
-    # ---- footer
-    y = 1000
-    draw_text(cv, 18, y, "Sources: Reuters, BBC, AP, AFP, Al Jazeera, The Guardian, UNFCCC, Kyiv Post, SCMP, ESPNcricinfo, Detiknews",
-              9, GREY)
-    draw_text(cv, 18, y + 11, "CONFIRMED = verified  ·  CLAIM = reported claim, not verified  ·  Scenes are drawn illustrations  ·  Wires read to press time 09:45 UTC",
-              9, GREY)
-    print("layout end y:", y + 22)
-    return cv
+            st = SMALL[row * 5 + col]
+            sx = MX + col * (scolw + 10)
+            st["scene"](cv, sx + 1, y, scolw - 2, thumb_h)
+            yy = y + thumb_h + 2
+            draw_text(cv, "%d  %s · %s" % (st["num"], st["loc"], st["cat"]),
+                      sx, yy, 9.5, RED, tracking=0.1)
+            yy += 10
+            yy = draw_para(cv, st["headline"], sx, yy, 12.5, INK, scolw, 13,
+                           max_lines=2)
+            yy = draw_para(cv, st["body"], sx, yy + 1, 11.5, INK, scolw, 12,
+                           max_lines=2)
+            draw_text(cv, st["source"], sx, yy + 1, 9, GREY)
+            st["_bottom"] = yy + 8
+        y = max(SMALL[row * 5 + c]["_bottom"] for c in range(5))
+        y += 3
+    # ---- ALSO list ----
+    draw_text(cv, "ALSO ON SUNDAY 22 NOVEMBER — 25 MORE STORIES", MX, y, 13, NAVY,
+              tracking=0.3)
+    y += 15
+    colw2 = (CW - 16) / 2.0
+    for i, (num, txt) in enumerate(ALSO):
+        ax = MX + (i // 13) * (colw2 + 16)
+        ay = y + (i % 13) * 10
+        draw_text(cv, "%d. %s" % (num, txt), ax, ay, 10, INK)
+    y += 13 * 10
+    # ---- map + DATE CHECK row ----
+    map_w = 580
+    dc_x = MX + map_w + 16
+    dc_w = W - MX - dc_x
+    row_h = 110
+    draw_text(cv, "WHERE IT HAPPENED", MX, y, 12, NAVY, tracking=0.3)
+    draw_map(cv, MX, y + 15, map_w, row_h - 15)
+    cv.rect(dc_x, y, dc_x + dc_w, y + row_h, hx("#fdf6f0"))
+    # red border (4 thin rects)
+    cv.rect(dc_x, y, dc_x + dc_w, y + 1.5, RED)
+    cv.rect(dc_x, y + row_h - 1.5, dc_x + dc_w, y + row_h, RED)
+    cv.rect(dc_x, y, dc_x + 1.5, y + row_h, RED)
+    cv.rect(dc_x + dc_w - 1.5, y, dc_x + dc_w, y + row_h, RED)
+    draw_text(cv, "DATE CHECK — NOT 22 NOVEMBER", dc_x + 8, y + 4, 10, RED,
+              tracking=0.2)
+    dc_colw = (dc_w - 16) / 2.0
+    for i, item in enumerate(DATECHECK):
+        ix = dc_x + 8 + (i // 7) * dc_colw
+        iy = y + 18 + (i % 7) * 11
+        draw_text(cv, "· " + item, ix, iy, 8.5, INK)
+    y += row_h
+    # ---- footer ----
+    cv.hline(MX, W - MX, y, 1, INK)
+    y += 3
+    draw_text(cv, "Sources: Reuters, BBC, AP, AFP, Al Jazeera, The Guardian, UNFCCC, "
+                  "Kyiv Post, SCMP, ESPNcricinfo, Detiknews",
+              MX, y, 9, GREY)
+    y += 10
+    draw_text(cv, "CONFIRMED = verified by several sources · CLAIM = single-source claim · "
+                  "Scenes are drawn illustrations · Wires read to press time 09:45 UTC",
+              MX, y, 9, GREY)
+    y += 10
+    return y
 
 
 def main():
-    out = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    os.makedirs(out, exist_ok=True)
-    cv = build()
-    data = png_bytes(cv)
-    with open(os.path.join(out, "entry.png"), "wb") as f:
+    import time
+    t0 = time.time()
+    cv = Canvas(W, H, "#f7f3e8")
+    bottom = draw_page(cv)
+    print("page bottom y =", bottom, "of", H)
+    print("title L1 cap/track:", fit_text("Sunday 22 November 2026", 58, CW))
+    print("title L2 cap/track:", fit_text(
+        "No Deal in Antalya, 186 Drones Over Kyiv, and Hong Kong's 98.79% Vote", 28, CW, min_cap=16))
+    outdir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
+    os.makedirs(outdir, exist_ok=True)
+    data = png_bytes(cv.px, W, H)
+    with open(os.path.join(outdir, "entry.png"), "wb") as f:
         f.write(data)
-    print("wrote", len(data), "bytes")
+    print("wrote", os.path.join(outdir, "entry.png"), len(data), "bytes in %.1fs"
+          % (time.time() - t0))
 
 
 if __name__ == "__main__":
