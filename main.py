@@ -558,12 +558,12 @@ def ill_small(cv, x, y, w, h, n):
 
 # ------------------------------------------------------------------- data
 # Region assignment (one region per story; totals must match the tabs):
-# EUROPE 6 (#2, #13, #16, #17, #30, #31), MIDDLE EAST 5 (#3, #8, #12, #26,
-# #32), AMERICAS 4 (#6, #7, #9, #10), ASIA-PACIFIC 9 (#4, #5, #11, #18, #19,
+# EUROPE 5 (#2, #13, #16, #17, #30), MIDDLE EAST 5 (#3, #8, #12, #26,
+# #31), AMERICAS 4 (#6, #7, #9, #10), ASIA-PACIFIC 9 (#4, #5, #11, #18, #19,
 # #20, #21, #27, #29), AFRICA 5 (#15, #22, #23, #24, #28), OCEANIA 2 (#14,
-# #25), WORLD 1 (#1 COP31 climate). Total 32.
+# #25), WORLD 1 (#1 COP31 climate). Total 31.
 REGIONS = [
-    ("EUROPE", 6, TEAL), ("MIDDLE EAST", 5, RED), ("AMERICAS", 4, BLUE),
+    ("EUROPE", 5, TEAL), ("MIDDLE EAST", 5, RED), ("AMERICAS", 4, BLUE),
     ("ASIA-PACIFIC", 9, ORANGE), ("AFRICA", 5, AF_GREEN),
     ("OCEANIA", 2, PURPLE), ("WORLD", 1, (90, 90, 90)),
 ]
@@ -670,9 +670,8 @@ ALSO = [
     (27, "EU and Indonesia sign trade deal after 10 years (DW)"),
     (28, "Sudan army retakes ~30 towns in Kordofan (FT)"),
     (29, "Bangladesh: 30 Awami League homes set on fire (Local)"),
-    (30, "Rugby: England beat New Zealand 27-12 (Reuters)"),
-    (31, "Football: Arsenal 2-2 Newcastle; Leeds 4-1 Chelsea (BBC)"),
-    (32, "Lebanon: Aoun demands Israel withdrawal (Al Jazeera)"),
+    (30, "Football: Liverpool thrash Man Utd 4-0; Hull 2-0 Brighton (Wires)"),
+    (31, "Lebanon: Aoun demands Israel withdrawal (Al Jazeera)"),
 ]
 
 DATECHECK = [
@@ -696,7 +695,7 @@ PINS = {
     19: (330, 42), 20: (318, 52), 21: (348, 20), 22: (244, 50),
     23: (222, 50), 24: (232, 58), 25: (340, 64),
     26: (258, 40), 27: (296, 48), 28: (218, 44), 29: (302, 34),
-    30: (182, 18), 31: (194, 10), 32: (242, 32),
+    30: (184, 12), 31: (242, 32),
 }
 
 CONTINENTS = [
@@ -722,9 +721,9 @@ CONTINENTS = [
 def draw_header(cv):
     cv.rect(0, 0, W, 40, NAVY)
     draw_text(cv, 12, 12, "THE WORLD IN ONE DAY", 2.0, WHITE, bold=True)
-    draw_text(cv, 1012 - text_w("32 STORIES - 7 REGIONS - EVERY ONE DATED "
+    draw_text(cv, 1012 - text_w("31 STORIES - 7 REGIONS - EVERY ONE DATED "
                                 "SUNDAY 22 NOVEMBER 2026", 1.5, 5.5), 13,
-              "32 STORIES - 7 REGIONS - EVERY ONE DATED "
+              "31 STORIES - 7 REGIONS - EVERY ONE DATED "
               "SUNDAY 22 NOVEMBER 2026", 1.5, (220, 225, 235), bold=True,
               track=5.5)
 
@@ -837,7 +836,7 @@ def draw_small(cv):
 
 def draw_also(cv):
     y = 754
-    draw_text(cv, 12, y, "ALSO ON SUNDAY 22 NOVEMBER - 17 MORE STORIES",
+    draw_text(cv, 12, y, "ALSO ON SUNDAY 22 NOVEMBER - 16 MORE STORIES",
               2.0, INK, bold=True, track=6.0)
     cv.hline(12, y + 20, 1000, INK, 2)
     for i, (n, txt) in enumerate(ALSO):
@@ -863,7 +862,7 @@ def draw_map(cv):
     cv.rect(bx, by, bw, bh, SEA)
     for pts in CONTINENTS:
         cv.poly([(bx + px, by + py) for px, py in pts], LAND)
-    for n in range(1, 33):
+    for n in range(1, 32):
         px, py = PINS[n]
         cv.circle(bx + px, by + py, 7, RED)
         cv.ring(bx + px, by + py, 7, WHITE, 1)
