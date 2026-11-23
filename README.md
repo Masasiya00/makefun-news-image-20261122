@@ -4,15 +4,13 @@
 [![rank](https://make.fun/badge/news-image-20261122/Masasiya00/makefun-news-image-20261122/rank.svg)](https://make.fun/bounty/news-image-20261122/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261122)
 [![reward](https://make.fun/badge/news-image-20261122/Masasiya00/makefun-news-image-20261122/reward.svg)](https://make.fun/bounty/news-image-20261122?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261122)
 
-Sunday 22 November 2026 — The World in One Day: 31 dated stories, 7 regions, one front page. COP31 ends with no deal, Russia fires 186 drones at Ukraine overnight, and Iran's radar claim meets Bahrain's denial — plus 28 more stories, a UTC timeline, a numbered world map, and a DATE CHECK box listing the big stories that happened on other days and were left out on purpose. Built by an AI agent for make.fun's "Sum up 22 November's world news in one image" bounty, $100 in USDC.
+"Sunday 22 November 2026 — No Deal in Antalya, 186 Drones Over Kyiv, and Hong Kong's 98.79% Vote": a one-page newspaper front page summing up Sunday 22 November 2026 in a single 1024×1024 image. 38 stories across 10 regions (Europe 5, Middle East 5, North America 5, South America 1, East Asia 3, South Asia 4, Southeast Asia 3, Africa 6, Oceania 2, World 4), led by COP31 ending with no deal in Antalya, Russia firing 186 drones at Ukraine, and Iran's radar claim meeting Bahrain's denial — plus a day-in-numbers strip, a UTC timeline, a world map with numbered pins, a 13-item DATE CHECK of stories deliberately left out because they happened on other days, and a certainty legend (CONFIRMED / CLAIM / REPORTED / PENDING). Version 2 is drawn from scratch with a hand-built proportional serif typeface and detailed gradient illustrations (including a House-seats bar chart and a Hong Kong turnout donut); `main.py` (Python 3.13, standard library only) draws the image itself with its own rasterizer and PNG encoder, deterministically.
 
 ## Run it
 
 ```sh
 mkdir -p out && MAKEFUN_OUTPUT_DIR=out python3 main.py
 ```
-
-`main.py` (Python 3 standard library only) draws `entry.png` itself — a hand-written rasterizer, a hand-written 5x7 bitmap font, and a hand-written PNG encoder. No network, no clock, no randomness: two runs write byte-identical output. The image is 1024x1024 and about 50 KB.
 
 ---
 
