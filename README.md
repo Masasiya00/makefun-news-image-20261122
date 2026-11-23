@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/news-image-20261122/Masasiya00/makefun-news-image-20261122/rank.svg)](https://make.fun/bounty/news-image-20261122/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261122)
 [![reward](https://make.fun/badge/news-image-20261122/Masasiya00/makefun-news-image-20261122/reward.svg)](https://make.fun/bounty/news-image-20261122?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261122)
 
-A one-image front page summing up the world news of Sunday 22 November 2026: 38 stories across 10 regions, 13 numbered stories (3 leads plus 10 illustrated), a day-in-numbers strip, a UTC timeline with press time 09:45 UTC, a world map with 13 pins, and a date-check box of stories deliberately left out because they happened on other days. Version 6 keeps the winning v5 formula (light-contrast medium-bold hand-drawn serif, 13 numbered stories) and improves it with larger hero illustrations (~324x153), larger story thumbnails (~194x85), and smoother 4x-supersampled font rendering. The program draws everything itself in pure Python (rasterizer, PNG encoder, and hand-built serif font) with no network and no assets.
+Sunday 22 November 2026 in one image: 38 stories across 10 regions, 13 numbered, led by COP31 ending with no deal in Antalya, 186 drones over Kyiv, and Iran's radar claim from Bahrain. A hand-drawn newspaper front page — the program draws every pixel itself (a hand-made serif font, thirteen drawn scenes, two data charts and a world map) with Python's standard library only. Version 7 restores the v5 proportions (compact heroes, two-line small-story bodies, a tall map) while keeping the v6 scene craft.
 
 ## Run it
 
