@@ -680,10 +680,12 @@ DATECHECK = [
     "'El Chapo Isidro' captured (Sat 21)",
     "Bayelsa boat capsizes, 24 dead (Sat 21 Nov)",
     "Gaza aid-van strike (Sat 21 Nov)",
+    "Arsenal 2-2; Leeds 4-1 Chelsea (Sat 21 Nov)",
     "Nvidia SEC probe first reported (Fri 20)",
     "Saudi strikes on Hodeidah (20-21 Nov)",
     "Peru earthquake (Fri 20 Nov)",
     "Copa Sudamericana final (Sat 21 Nov)",
+    "Rugby: England beat NZ 37-12 (Sat 21 Nov)",
 ]
 
 # pin positions on the map (local coords, map box 388 x 86)
@@ -886,10 +888,10 @@ def draw_datecheck(cv):
               "Left out on purpose: these happened on other days.",
               1.25, GRAY, track=5.5)
     for i, item in enumerate(DATECHECK):
-        col = 0 if i < 5 else 1
-        r = i % 5
+        col = 0 if i < 6 else 1
+        r = i % 6
         xx = x + 12 if col == 0 else x + 312
-        yy = y + 40 + r * 13
+        yy = y + 40 + r * 11
         draw_text(cv, xx, yy, "\u00d7 ", 1.25, RED, bold=True, track=5.5)
         draw_text(cv, xx + 8, yy, item, 1.2, INK, track=5.5)
 
