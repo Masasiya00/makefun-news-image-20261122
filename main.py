@@ -538,19 +538,13 @@ def ill_small(cv, x, y, w, h, n):
         cv.circle(x + 128, y + 14, 7, (220, 230, 60))
         cv.poly([(x + 40, y + 44), (x + 52, y + 46), (x + 38, y + 50)],
                 (220, 230, 60))
-    elif n == 14:  # spacecraft + Mercury
-        cv.rect(x, y, w, h, (16, 22, 40))
-        cv.circle(x + 118, y + 26, 16, (200, 150, 90))
-        cv.circle(x + 112, y + 20, 3, (160, 110, 60))
-        cv.circle(x + 124, y + 30, 2, (160, 110, 60))
-        cv.circle(x + 120, y + 18, 2, (160, 110, 60))
-        cv.rect(x + 30, y + 22, 26, 10, (180, 190, 200))
-        cv.rect(x + 56, y + 24, 8, 6, (220, 220, 220))
-        cv.rect(x + 8, y + 20, 22, 14, (60, 110, 180))
-        cv.rect(x + 64, y + 20, 22, 14, (60, 110, 180))
-        cv.rect(x + 20, y + 8, 2, 2, WHITE)
-        cv.rect(x + 90, y + 6, 2, 2, WHITE)
-        cv.rect(x + 140, y + 10, 2, 2, WHITE)
+    elif n == 14:  # Olympic rings (Melbourne 1956, 70 years on)
+        cv.rect(x, y, w, h, CREAM)
+        cv.ring(x + 62, y + 24, 8, (0, 133, 199))
+        cv.ring(x + 82, y + 24, 8, (30, 30, 30))
+        cv.ring(x + 102, y + 24, 8, (224, 0, 32))
+        cv.ring(x + 72, y + 35, 8, (252, 177, 49))
+        cv.ring(x + 92, y + 35, 8, (0, 166, 81))
     elif n == 15:  # cargo ship ablaze
         cv.rect(x, y, w, h, (24, 40, 64))
         cv.rect(x, y + 34, w, 18, (40, 90, 120))
@@ -564,21 +558,21 @@ def ill_small(cv, x, y, w, h, n):
 
 # ------------------------------------------------------------------- data
 # Region assignment (one region per story; totals must match the tabs):
-# EUROPE 6 (#2, #13, #16, #17, #31, #32), MIDDLE EAST 5 (#3, #8, #12, #27,
-# #33), AMERICAS 4 (#6, #7, #9, #10), ASIA-PACIFIC 9 (#4, #5, #11, #18, #19,
-# #20, #21, #28, #30), AFRICA 5 (#15, #22, #23, #24, #29), OCEANIA 2 (#25,
-# #26), WORLD 2 (#1 COP31 climate, #14 space). Total 33.
+# EUROPE 6 (#2, #13, #16, #17, #30, #31), MIDDLE EAST 5 (#3, #8, #12, #26,
+# #32), AMERICAS 4 (#6, #7, #9, #10), ASIA-PACIFIC 9 (#4, #5, #11, #18, #19,
+# #20, #21, #27, #29), AFRICA 5 (#15, #22, #23, #24, #28), OCEANIA 2 (#14,
+# #25), WORLD 1 (#1 COP31 climate). Total 32.
 REGIONS = [
     ("EUROPE", 6, TEAL), ("MIDDLE EAST", 5, RED), ("AMERICAS", 4, BLUE),
     ("ASIA-PACIFIC", 9, ORANGE), ("AFRICA", 5, AF_GREEN),
-    ("OCEANIA", 2, PURPLE), ("WORLD", 2, (90, 90, 90)),
+    ("OCEANIA", 2, PURPLE), ("WORLD", 1, (90, 90, 90)),
 ]
 
 NUMBERS = [
     ("186", "DRONES FIRED"),
     ("161", "DRONES DOWNED"),
     ("35%", "CLEAN POWER BY 2035"),
-    ("$120bn", "ADAPTATION TARGET"),
+    ("$120bn", "ADAPTATION TARGET DROPPED"),
     ("720/9", "INDIA'S RECORD TOTAL"),
     ("98.79%", "HONG KONG TURNOUT"),
 ]
@@ -652,9 +646,10 @@ SMALL = [
     (13, "TURIN - TENNIS", "Alcaraz wins first ATP Finals",
      ["Beats Zverev in the", "Turin final (ATP)"],
      "FIRST TITLE", 13),
-    (14, "SPACE", "BepiColombo enters Mercury orbit",
-     ["After an eight-year", "journey (ESA)"],
-     "ORBIT REACHED", 14),
+    (14, "MELBOURNE - OLYMPICS", "70 years since Melbourne's Games",
+     ["Opened 22 Nov 1956,", "70 years ago today (ABC)",
+      "first in S. hemisphere"],
+     "70 YEARS ON", 14),
     (15, "OFF BENGHAZI - SEA", "Sparta II still burning",
      ["Hit by drone Sat.;", "Finland rescue (Wires)"],
      "SHIP ABLAZE", 15),
@@ -671,21 +666,20 @@ ALSO = [
     (23, "Sudan: RSF accused of killing civilians in W. Kordofan (Claim)"),
     (24, "Kenya discharges its last Ebola patient (Wires)"),
     (25, "Marles rejects US report on AUKUS subs (ABC)"),
-    (26, "Melbourne: 70 years since 1956 Olympics opened (ABC)"),
-    (27, "Trump seeks 'permanent' Israel deal; Doha talks (Al Jazeera)"),
-    (28, "EU and Indonesia sign trade deal after 10 years (DW)"),
-    (29, "Sudan army retakes ~30 towns in Kordofan (FT)"),
-    (30, "Bangladesh: 30 Awami League homes set on fire (Local)"),
-    (31, "Rugby: England beat New Zealand 27-12 (Reuters)"),
-    (32, "Football: Arsenal 2-2 Newcastle; Leeds 4-1 Chelsea (BBC)"),
-    (33, "Lebanon: Aoun demands Israel withdrawal (Al Jazeera)"),
+    (26, "Trump seeks 'permanent' Israel deal; Doha talks (Al Jazeera)"),
+    (27, "EU and Indonesia sign trade deal after 10 years (DW)"),
+    (28, "Sudan army retakes ~30 towns in Kordofan (FT)"),
+    (29, "Bangladesh: 30 Awami League homes set on fire (Local)"),
+    (30, "Rugby: England beat New Zealand 27-12 (Reuters)"),
+    (31, "Football: Arsenal 2-2 Newcastle; Leeds 4-1 Chelsea (BBC)"),
+    (32, "Lebanon: Aoun demands Israel withdrawal (Al Jazeera)"),
 ]
 
 DATECHECK = [
     "400-drone barrage (Thu 19-Fri 20 Nov)",
     "148-drone night (Fri 20-Sat 21 Nov)",
     "'El Chapo Isidro' captured (Sat 21)",
-    "Bayelsa boat capsizes, 24 dead (Fri 21)",
+    "Bayelsa boat capsizes, 24 dead (Sat 21 Nov)",
     "Gaza aid-van strike (Sat 21 Nov)",
     "Nvidia SEC probe first reported (Fri 20)",
     "Saudi strikes on Hodeidah (20-21 Nov)",
@@ -697,12 +691,12 @@ DATECHECK = [
 PINS = {
     1: (236, 18), 2: (214, 16), 3: (256, 26), 4: (322, 30), 5: (372, 76),
     6: (55, 28), 7: (68, 36), 8: (266, 22), 9: (118, 62), 10: (88, 24),
-    11: (304, 56), 12: (228, 36), 13: (198, 20), 14: (380, 6),
+    11: (304, 56), 12: (228, 36), 13: (198, 20), 14: (352, 70),
     15: (204, 34), 16: (220, 8), 17: (206, 6), 18: (292, 32),
     19: (330, 42), 20: (318, 52), 21: (348, 20), 22: (244, 50),
-    23: (222, 50), 24: (232, 58), 25: (340, 64), 26: (352, 70),
-    27: (258, 40), 28: (296, 48), 29: (218, 44), 30: (302, 34),
-    31: (182, 18), 32: (194, 10), 33: (242, 32),
+    23: (222, 50), 24: (232, 58), 25: (340, 64),
+    26: (258, 40), 27: (296, 48), 28: (218, 44), 29: (302, 34),
+    30: (182, 18), 31: (194, 10), 32: (242, 32),
 }
 
 CONTINENTS = [
@@ -728,9 +722,9 @@ CONTINENTS = [
 def draw_header(cv):
     cv.rect(0, 0, W, 40, NAVY)
     draw_text(cv, 12, 12, "THE WORLD IN ONE DAY", 2.0, WHITE, bold=True)
-    draw_text(cv, 1012 - text_w("33 STORIES - 7 REGIONS - EVERY ONE DATED "
+    draw_text(cv, 1012 - text_w("32 STORIES - 7 REGIONS - EVERY ONE DATED "
                                 "SUNDAY 22 NOVEMBER 2026", 1.5, 5.5), 13,
-              "33 STORIES - 7 REGIONS - EVERY ONE DATED "
+              "32 STORIES - 7 REGIONS - EVERY ONE DATED "
               "SUNDAY 22 NOVEMBER 2026", 1.5, (220, 225, 235), bold=True,
               track=5.5)
 
@@ -757,7 +751,8 @@ def draw_numbers(cv):
         cv.rect(x, y, bw, 1, RULE)
         draw_text_c(cv, x + bw // 2, y + 6, val, 4.0, RED, bold=True,
                     track=5.5)
-        draw_text_c(cv, x + bw // 2, y + 38, lab, 1.25, INK, bold=True,
+        lsc = 1.1 if len(lab) > 20 else 1.25
+        draw_text_c(cv, x + bw // 2, y + 38, lab, lsc, INK, bold=True,
                     track=5.5)
 
 
@@ -829,18 +824,20 @@ def draw_small(cv):
             y = y0 + row * 118
             ill_small(cv, x, y, cw, 52, illn)
             tag(cv, x + 3, y + 3, tg)
-            draw_text(cv, x, y + 56, "%d %s" % (n, loc), 1.25, INK,
+            draw_text(cv, x, y + 54, "%d %s" % (n, loc), 1.25, INK,
                       bold=True, track=5.5)
             hlines = wrap(head, cw, 1.5, 5.5)
-            draw_lines(cv, x, y + 70, hlines[:2], 1.5, INK, 12, bold=True,
+            draw_lines(cv, x, y + 66, hlines[:2], 1.5, INK, 11, bold=True,
                        track=5.5)
-            draw_lines(cv, x, y + 96, body[:2], 1.2, (40, 40, 40), 10,
+            draw_lines(cv, x, y + 90, body[:3], 1.2, (40, 40, 40), 9,
                        track=5.5)
+            if col < 5:
+                cv.vline(x + cw + 3, y + 54, 63, RULE)
 
 
 def draw_also(cv):
     y = 754
-    draw_text(cv, 12, y, "ALSO ON SUNDAY 22 NOVEMBER - 18 MORE STORIES",
+    draw_text(cv, 12, y, "ALSO ON SUNDAY 22 NOVEMBER - 17 MORE STORIES",
               2.0, INK, bold=True, track=6.0)
     cv.hline(12, y + 20, 1000, INK, 2)
     for i, (n, txt) in enumerate(ALSO):
@@ -866,7 +863,7 @@ def draw_map(cv):
     cv.rect(bx, by, bw, bh, SEA)
     for pts in CONTINENTS:
         cv.poly([(bx + px, by + py) for px, py in pts], LAND)
-    for n in range(1, 34):
+    for n in range(1, 33):
         px, py = PINS[n]
         cv.circle(bx + px, by + py, 7, RED)
         cv.ring(bx + px, by + py, 7, WHITE, 1)
